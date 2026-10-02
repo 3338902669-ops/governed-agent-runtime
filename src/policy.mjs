@@ -324,13 +324,54 @@ export const RULES = [
     },
   },
   {
+    id: 'P18c',
+    invariant: 'I2',
+    code: 'RESOURCE_NOT_DECLARED',
+    when(ctx) {
+      // A task-less session that declares no resource slipped past P18b entirely. Writing without
+      // naming what you are writing to is not a thing this runtime can police, so it is refused.
+      // `execute` stays allowed: a verifier legitimately runs commands with no task and no resource.
+      if (!ctx.session || ctx.session.taskId) return null;
+      if (ctx.request.action !== 'write') return null;
+      if (ctx.request.resource) return null;
+      return decision('DENY', 'RESOURCE_NOT_DECLARED',
+        'a write from a session bound to no task must name the resource it touches', 'I2');
+    },
+  },
+  {
+    id: 'P18d',
+    invariant: 'I15',
+    code: 'SELF_APPROVAL',
+    when(ctx) {
+      // The check used to live only in the `cp.approve` helper, so calling the gated action
+      // directly walked around it (security scan, high). Independence belongs in the gate.
+      if (ctx.request.action !== 'approve') return null;
+      const targetId = ctx.request.params && ctx.request.params.sessionId;
+      if (!targetId || !ctx.sessions) return null;
+      const target = ctx.sessions.get(targetId);
+      if (!target) return null;
+      if (target.agentId !== ctx.request.agentId) return null;
+      return decision('DENY', 'SELF_APPROVAL',
+        'agent ' + ctx.request.agentId + ' may not approve its own external action', 'I15');
+    },
+  },
+  {
     id: 'P19',
     invariant: 'I12',
     code: 'EXTERNAL_ACTION_UNAPPROVED',
     when(ctx) {
       if (!ctx.request.externalAction) return null;
       const approval = approvalOf(ctx);
-      if (approval && approval.approved) return null;
+      if (approval && approval.approved) {
+        // An approval names a target AND an operation. Without the kind it authorised any action
+        // against that target (security scan, low).
+        if (approval.kind && approval.kind !== ctx.request.externalAction.kind) {
+          return decision('REQUIRE_APPROVAL', 'APPROVAL_WRONG_KIND',
+            'the approval authorises "' + approval.kind + '", not "' + ctx.request.externalAction.kind + '"', 'I12',
+            [{ kind: 'approval', scope: ctx.request.externalAction.target, action: ctx.request.externalAction.kind }]);
+        }
+        return null;
+      }
       return decision('REQUIRE_APPROVAL', 'EXTERNAL_ACTION_UNAPPROVED',
         'external action "' + ctx.request.externalAction.kind + '" needs an approval naming "' +
         String(ctx.request.externalAction.target) + '"', 'I12',
@@ -422,7 +463,7 @@ export const RULES = [
       const artifactId = ctx.request.target;
       const current = ctx.registry.current(artifactId);
       const passing = current.evaluations.filter(function (e) { return e.passed === true; });
-      const independent = passing.filter(function (e) { return !current.createdBy || e.by !== current.createdBy; });
+      const independent = passing.filter(function (e) { return e.by !== current.createdBy; });
       if (independent.length > 0) return null;
       return decision('REQUIRE_VERIFICATION', 'PROMOTION_NEEDS_INDEPENDENT_EVALUATION',
         'artifact ' + artifactId + ' has no passed evaluation from someone other than its author', 'I15',
@@ -464,7 +505,7 @@ export const RULES = [
       if (ctx.request.action !== 'promote') return null;
       const current = ctx.registry.current(ctx.request.target);
       const approval = ctx.request.params && ctx.request.params.approval;
-      if (!approval || !current.createdBy) return null;
+      if (!approval) return null;
       const normalise = function (v) { return String(v === undefined || v === null ? '' : v).trim().toLowerCase(); };
       if (normalise(approval.approvedBy) !== normalise(current.createdBy)) return null;
       return decision('DENY', 'SELF_APPROVAL', 'the artifact author may not approve its own promotion', 'I15');

@@ -71,6 +71,9 @@ export async function createControlPlane(options) {
     const ctx = {
       request,
       session,
+      // The gate needs to resolve OTHER sessions too: an approval names the session it is for, and
+      // independence has to be checked where the action is authorised, not only in the wrapper.
+      sessions,
       identity,
       role,
       registry,
@@ -265,6 +268,11 @@ export async function createControlPlane(options) {
         return registry.revoke({ artifactId: target, reason: args.reason, by: agentId, at: clock() });
       case 'approve': {
         const session = requireSession(args.sessionId);
+        // Defence in depth behind the grant: the gate rule P18d refuses this before a grant is even
+        // issued, and the executor refuses it again.
+        if (session.agentId === agentId) {
+          throw new Refusal('SELF_APPROVAL', 'agent ' + agentId + ' may not approve its own external action');
+        }
         // The governance engine records the approval that unlocks dispatch. If it refuses, the
         // approval does NOT happen: it is not downgraded to a note on a success record. Swallowing
         // that refusal was a WARNING-shaped hole in an ALLOW/DENY system (finding C3).
@@ -275,6 +283,7 @@ export async function createControlPlane(options) {
           approvedBy: args.approvedBy,
           approvedByAgent: args.approvedByAgent || null,
           scope: args.scope,
+          kind: args.kind === undefined ? null : args.kind,
           sessionId: session.sessionId,
           agentId: session.agentId,
           definitionHash: session.definitionHash,
@@ -520,6 +529,9 @@ export async function createControlPlane(options) {
   async function approve(input) {
     const approverSession = requireSession(input.sessionId);
     const targetSession = requireSession(input.targetSessionId || input.sessionId);
+    // An approval authorises a KIND of operation against a target, not just a target.
+    const govTask = targetSession.taskId && governance.available ? governance.view(targetSession.taskId) : null;
+    const kind = input.kind || (govTask && govTask.externalAction ? govTask.externalAction.kind : null);
     const approver = agents.get(approverSession.agentId);
     // Independence is decided by the SESSION's agent, not by the `approvedBy` string the caller
     // supplies: otherwise an agent satisfies the approval rule by typing somebody else's name.
@@ -539,6 +551,7 @@ export async function createControlPlane(options) {
         sessionId: targetSession.sessionId,
         approvedBy: input.approvedBy,
         scope: input.scope,
+        kind,
         expiresAt: input.expiresAt || null,
         approverRole: approver ? approver.roleId : null,
       },
@@ -551,6 +564,7 @@ export async function createControlPlane(options) {
         // The grant identifies who is really approving; the name above is only a label.
         approvedByAgent: approverSession.agentId,
         scope: input.scope,
+        kind,
         expiresAt: input.expiresAt || null,
       },
     });
@@ -752,6 +766,36 @@ export async function createControlPlane(options) {
    * lifecycle - with identity/trust minting replaced by a loud refusal. This is the object the
    * security scan's high finding was about, so it can be tested directly instead of reasoned about.
    */
+  /**
+   * A session-scoped client: the gate and the work actions, with the session and the acting agent
+   * fixed by construction. This is what a runner should hold instead of the control plane itself.
+   */
+  api.clientFor = function clientFor(sessionId) {
+    const current = () => {
+      const s = sessions.get(sessionId);
+      if (!s) throw new Refusal('SESSION_UNKNOWN', 'no session ' + String(sessionId));
+      return s;
+    };
+    const bound = (fn) => (input) => fn({ ...(input || {}), sessionId, agentId: current().agentId });
+    return Object.freeze({
+      sessionId,
+      session: () => clone(current()),
+      submit: (request) => submit({ ...request, sessionId, agentId: current().agentId }),
+      execute,
+      act: (request) => act({ ...request, sessionId, agentId: current().agentId }),
+      produceEvidence: bound(api.produceEvidence),
+      verify: bound(api.verify),
+      markDone: bound(api.markDone),
+      handoff: (input) => handoff({ ...(input || {}), fromSessionId: sessionId }),
+      close: (reason) => closeSession(sessionId, reason),
+      remember: (input) => remember({ ...input, agentId: current().agentId }),
+      recall: (key) => recall(current().agentId, key),
+      systemFact,
+      taskState,
+      audit,
+    });
+  };
+
   api.runnerSurface = function runnerSurface() {
     const view = {};
     for (const key of Object.keys(api)) view[key] = api[key];
@@ -765,6 +809,11 @@ export async function createControlPlane(options) {
     view.registerArtifact = operatorOnly('registerArtifact');
     view.bootstrapTrust = operatorOnly('bootstrapTrust');
     view.createAgent = operatorOnly('createAgent');
+    // Opening a session for an already-minted agent let ONE actor hold a verifier session and a
+    // coordinator session at once, which made every "a different agent did it" check cosmetic
+    // (security scan, high). Sessions are opened by the host; a runner gets a scoped client.
+    view.openSession = operatorOnly('openSession');
+    view.closeSession = operatorOnly('closeSession');
     view.describe = () => ({ ...api.describe(), internalsExposed: false, operatorSurfaceExposed: false });
     view.runnerSurface = () => Object.freeze({ ...view });
     return Object.freeze(view);

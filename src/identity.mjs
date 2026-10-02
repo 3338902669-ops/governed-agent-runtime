@@ -151,6 +151,12 @@ export class ArtifactRegistry {
     if (!input.roleId || !DEFAULT_ROLES[input.roleId]) {
       throw new Refusal('ARTIFACT_INVALID', 'unknown role: ' + String(input.roleId));
     }
+    // Required, not optional: with a missing author the independence checks silently skipped
+    // themselves (`!record.createdBy || ...`), so an unattributed artifact could be evaluated and
+    // promoted by anyone (security scan, low).
+    if (!input.createdBy) {
+      throw new Refusal('ARTIFACT_NEEDS_AUTHOR', 'an artifact must record who wrote it; independence checks depend on it');
+    }
     const artifactId = input.artifactId || newId('artifact');
     const definition = {
       artifactId,
@@ -264,7 +270,7 @@ export class ArtifactRegistry {
         'artifact ' + input.artifactId + ' was superseded by ' + String(record.supersededBy));
     }
     if (!input.by) throw new Refusal('EVALUATION_NEEDS_EVALUATOR', 'an evaluation must name its evaluator');
-    if (record.createdBy && input.by === record.createdBy) {
+    if (input.by === record.createdBy) {
       throw new Refusal('SELF_EVALUATION', 'the author of an artifact may not evaluate it: ' + input.by);
     }
     if (checks.length === 0) {
@@ -319,7 +325,7 @@ export class ArtifactRegistry {
       throw new Refusal('PROMOTION_NEEDS_EVALUATION', 'artifact ' + input.artifactId + ' has no passed evaluation');
     }
     const independent = record.evaluations.filter(function (e) {
-      return e.passed === true && (!record.createdBy || e.by !== record.createdBy);
+      return e.passed === true && e.by !== record.createdBy;
     });
     if (independent.length === 0) {
       throw new Refusal('PROMOTION_NEEDS_INDEPENDENT_EVALUATION', 'every passed evaluation was written by the author');
@@ -370,6 +376,14 @@ export class ArtifactRegistry {
    */
   mutate(input) {
     const previous = this.current(input.artifactId);
+    // Revocation is terminal on every path, not just the evaluate one. `mutate` used to rewrite a
+    // REVOKED version to SUPERSEDED, and `rollback` then resurrected it - a second door onto the
+    // same invariant (security scan, high).
+    if (previous.trust === 'REVOKED') {
+      throw new Refusal('MUTATION_OF_REVOKED_ARTIFACT',
+        'artifact ' + input.artifactId + ' trust was revoked (' + String(previous.revokedReason) +
+        '); a new version cannot be derived from it');
+    }
     previous.supersededBy = null; // filled below
     const next = this.register({
       artifactId: input.artifactId,
@@ -395,6 +409,10 @@ export class ArtifactRegistry {
    */
   rollback(input) {
     const target = this.versionOf(input.artifactId, input.toVersion);
+    if (target.trust === 'REVOKED') {
+      throw new Refusal('ROLLBACK_TO_REVOKED',
+        'version ' + input.toVersion + ' of ' + input.artifactId + ' has revoked trust; rolling back to it would reinstate it');
+    }
     const everVerified = target.evaluations.some(function (e) { return e.passed === true; });
     const trustOk = target.trust === 'VALIDATED' || target.trust === 'TRUSTED' || target.trust === 'SUPERSEDED';
     if (!everVerified || !trustOk) {

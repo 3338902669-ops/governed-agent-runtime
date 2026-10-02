@@ -45,6 +45,27 @@ const MUTATIONS = [
     caughtBy: 'an expired approval still authorises an external action',
   },
   {
+    id: 'approval-check-in-wrapper-only',
+    file: 'src/policy.mjs',
+    find: '      if (target.agentId !== ctx.request.agentId) return null;',
+    replace: '      if (true) return null;',
+    caughtBy: 'an agent can approve its own external action through the gated action',
+  },
+  {
+    id: 'revocation-door-via-mutate',
+    file: 'src/identity.mjs',
+    find: "    if (previous.trust === 'REVOKED') {",
+    replace: '    if (false) {',
+    caughtBy: 'revocation is terminal only on the evaluate path',
+  },
+  {
+    id: 'runner-can-open-sessions',
+    file: 'src/control-plane.mjs',
+    find: "    view.openSession = operatorOnly('openSession');",
+    replace: '    view.openSession = openSession;',
+    caughtBy: 'a runner can open a session for any minted agent',
+  },
+  {
     id: 'runner-surface-inherits-raw',
     file: 'src/control-plane.mjs',
     find: '    view.ledger = readOnlyLedger(ledger);',

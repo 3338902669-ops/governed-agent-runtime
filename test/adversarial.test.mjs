@@ -480,6 +480,57 @@ test('A21: a verifier bound to a task cannot pass off unrelated work as that tas
   assert.equal(world.cp.ledger.verifications.size, 0);
 });
 
+test('A22: an agent cannot approve its own external action through the gated action', async () => {
+  const world = await makeWorld();
+  const work = await openWork(world, { title: 'deploy', resources: ['file:src/a.mjs'], externalAction: 'deploy', externalTarget: 'production' });
+  const coord = await world.cp.openSession({ agentId: 'agent-coord', taskId: work.task.taskId, own: false });
+  // Straight at the gated action, not through the cp.approve helper where the check used to live.
+  const direct = await world.cp.act(request(coord, 'approve', {
+    target: work.task.taskId,
+    params: { sessionId: coord.sessionId, approvedBy: 'human-root', scope: 'production', kind: 'deploy' },
+  }));
+  assert.equal(refused(direct, 'self-approval through the gated action').code, 'SELF_APPROVAL');
+  assert.equal(world.cp.session(coord.sessionId).approval, null);
+});
+
+test('A23: revocation is terminal through mutate and rollback too', async () => {
+  const world = await makeWorld();
+  const artifactId = world.artifacts.impl.artifactId;
+  const coord = await world.cp.openSession({ agentId: 'agent-coord', own: false });
+  await world.cp.revokeTrust({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, reason: 'incident response' });
+  assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
+
+  // mutate used to rewrite REVOKED to SUPERSEDED, and rollback then resurrected it.
+  await assert.rejects(
+    () => world.cp.mutateArtifact({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, patch: { version: '2.0.0' } }),
+    (e) => e.code === 'MUTATION_OF_REVOKED_ARTIFACT',
+  );
+  assert.throws(
+    () => world.cp.registry.rollback({ artifactId, toVersion: '1.0.0', by: 'agent-coord' }),
+    (e) => e.code === 'ROLLBACK_TO_REVOKED',
+  );
+  assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
+  assert.equal(world.cp.artifact(artifactId).version, world.artifacts.impl.version);
+});
+
+test('A24: a runner cannot open a session for another agent', async () => {
+  const world = await makeWorld();
+  const runner = world.cp.runnerSurface();
+  // One actor holding two sessions makes every "a different agent did it" check cosmetic.
+  assert.throws(() => runner.openSession({ agentId: 'agent-verify' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+  assert.throws(() => runner.closeSession('anything'), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+
+  // What a runner holds instead: a client pinned to one session.
+  const session = await world.cp.openSession({ agentId: 'agent-impl', own: false });
+  const client = world.cp.clientFor(session.sessionId);
+  assert.equal(client.sessionId, session.sessionId);
+  assert.equal(client.session().agentId, 'agent-impl');
+  assert.equal(typeof client.act, 'function');
+  assert.equal(client.openSession, undefined);
+  assert.equal(client.registry, undefined);
+  assert.equal(client.ledger, undefined);
+});
+
 test('A15b: the audit detects a runtime that diverged from governance', async () => {
   const world = await makeWorld();
   const work = await openWork(world);
