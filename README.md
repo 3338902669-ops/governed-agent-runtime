@@ -2,7 +2,7 @@
 
 **A runtime where an agent cannot act unless governance says so - and cannot declare its own success either.**
 
-This is the layer that sits under [Agent Orchestra](../agent-orchestra-repo). Agent Orchestra answers
+This is the layer that sits under [Agent Orchestra](https://github.com/3338902669-ops/agent-orchestra). Agent Orchestra answers
 *"how do several agents finish a task correctly?"* (I1-I10: task, resource, ownership, handoff,
 verification, evidence, approval, recovery). This repository answers the next question:
 
@@ -28,7 +28,13 @@ Agent -> Action Request -> Governance -> Policy -> ALLOW / DENY / BLOCK / REQUIR
 
 ## Run it
 
-Node 18+, zero dependencies.
+Node 18+, zero dependencies in this repository.
+
+**One external dependency, and it is deliberate.** The governance layer is the sibling project
+[Agent Orchestra](https://github.com/3338902669-ops/agent-orchestra): clone it next to this one, or
+point `GAR_GOVERNANCE_LIB` at its `scripts/orchestrator/lib.mjs`. If it is missing the runtime
+**fails closed** - every action is blocked and the tests that expect an ALLOW fail. That is the
+designed behaviour, not a packaging bug.
 
 ```bash
 node bin/demo.mjs          # the governed path, twelve attacks, and the audit
