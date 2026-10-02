@@ -161,6 +161,19 @@ export const RULES = [
     },
   },
   {
+    id: 'P08b',
+    invariant: 'I17',
+    code: 'EVALUATION_OF_REVOKED_ARTIFACT',
+    when(ctx) {
+      if (ctx.request.action !== 'evaluate') return null;
+      let current;
+      try { current = ctx.registry.current(ctx.request.target); } catch (error) { return null; }
+      if (current.trust !== 'REVOKED') return null;
+      return decision('BLOCK', 'EVALUATION_OF_REVOKED_ARTIFACT',
+        'artifact ' + String(ctx.request.target) + ' trust was revoked; an evaluation cannot reinstate it', 'I17');
+    },
+  },
+  {
     id: 'P09',
     invariant: 'I12',
     code: 'ROLE_RETIRED',
@@ -270,10 +283,11 @@ export const RULES = [
     invariant: 'I12',
     code: 'TASK_BLOCKED',
     when(ctx) {
-      if (!ctx.request.taskId || !ctx.governance || !ctx.governance.available) return null;
-      if (!ctx.governance.isBlocked(ctx.request.taskId)) return null;
+      const boundTask = ctx.session ? ctx.session.taskId : null;
+      if (!boundTask || !ctx.governance || !ctx.governance.available) return null;
+      if (!ctx.governance.isBlocked(boundTask)) return null;
       return decision('BLOCK', 'TASK_BLOCKED',
-        'the governance engine has blocked task ' + ctx.request.taskId + '; it needs an explicit recovery', 'I12');
+        'the governance engine has blocked task ' + boundTask + '; it needs an explicit recovery', 'I12');
     },
   },
   {
@@ -281,9 +295,12 @@ export const RULES = [
     invariant: 'I12',
     code: 'RESOURCE_CONFLICT',
     when(ctx) {
-      if (!ctx.request.taskId || !ctx.governance || !ctx.governance.available) return null;
+      // The task is taken from the SESSION, never from the request: otherwise an agent could name a
+      // task it owns while acting on another task's resources, and the exclusion check would pass.
+      const boundTask = ctx.session ? ctx.session.taskId : null;
+      if (!boundTask || !ctx.governance || !ctx.governance.available) return null;
       if (!MUTATING_ACTIONS.includes(ctx.request.action) && ctx.request.action !== 'produce_evidence') return null;
-      const probe = ctx.governance.probeClaim(ctx.request.taskId, ctx.request.agentId);
+      const probe = ctx.governance.probeClaim(boundTask, ctx.request.agentId);
       if (probe.ok) return null;
       return decision(probe.code === 'TASK_BLOCKED' ? 'BLOCK' : 'DENY', probe.code, probe.message, 'I2');
     },
@@ -300,6 +317,19 @@ export const RULES = [
         'external action "' + ctx.request.externalAction.kind + '" needs an approval naming "' +
         String(ctx.request.externalAction.target) + '"', 'I12',
         [{ kind: 'approval', scope: ctx.request.externalAction.target, action: ctx.request.externalAction.kind }]);
+    },
+  },
+  {
+    id: 'P19b',
+    invariant: 'I12',
+    code: 'EXTERNAL_TARGET_MISMATCH',
+    when(ctx) {
+      if (!ctx.request.externalAction) return null;
+      const normalise = function (v) { return String(v === undefined || v === null ? '' : v).trim().toLowerCase(); };
+      if (normalise(ctx.request.target) === normalise(ctx.request.externalAction.target)) return null;
+      return decision('DENY', 'EXTERNAL_TARGET_MISMATCH',
+        'the approved target is "' + String(ctx.request.externalAction.target) + '" but the action would run against "' +
+        String(ctx.request.target) + '"', 'I12');
     },
   },
   {

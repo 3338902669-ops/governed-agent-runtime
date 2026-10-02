@@ -45,6 +45,13 @@ const MUTATIONS = [
     caughtBy: 'an expired approval still authorises an external action',
   },
   {
+    id: 'revocation-is-terminal',
+    file: 'src/identity.mjs',
+    find: "    if (record.trust === 'REVOKED') {",
+    replace: '    if (false) {',
+    caughtBy: 'a revoked artifact can be revived by evaluating it',
+  },
+  {
     id: 'forged-execution',
     file: 'src/ledger.mjs',
     find: "    if (!grant) {",

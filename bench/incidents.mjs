@@ -67,7 +67,7 @@ export const INCIDENTS = [
     async runtime() {
       const world = await makeWorld();
       const work = await openWork(world);
-      await world.cp.act(request(work.sImpl, 'execute', { target: 'deploy-runner', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' } }));
+      await world.cp.act(request(work.sImpl, 'execute', { target: 'production', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' } }));
       return world.cp.externalCalls().length > 0;
     },
   },
@@ -81,7 +81,7 @@ export const INCIDENTS = [
       const approver = await world.cp.openSession({ agentId: 'agent-coord', own: false });
       await world.cp.approve({ sessionId: approver.sessionId, targetSessionId: work.sImpl.sessionId, approvedBy: 'human-root', scope: 'production', expiresAt: '2026-10-01T23:00:00.000Z' });
       world.clock.advance(3600000);
-      await world.cp.act(request(work.sImpl, 'execute', { target: 'deploy-runner', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' } }));
+      await world.cp.act(request(work.sImpl, 'execute', { target: 'production', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' } }));
       return world.cp.externalCalls().length > 0;
     },
   },

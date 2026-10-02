@@ -72,6 +72,68 @@ The field only covered blocking divergences, yet it was named `consistent`. A ru
 
 ## The lesson that generalises
 
+## Round 4 - the security scan (codex-security + DeepSeek, a different channel)
+
+A second, independent channel was run over the same tree: `node scripts/secscan.cjs --root
+governed-agent-runtime --name governed-agent-runtime --model deepseek-flash`. The relay/luna channel
+preflighted as unavailable (the local router forwards to an endpoint that rejects `gpt-5.6-luna`), so
+the documented DeepSeek-direct fallback was used.
+
+`--evaluate` on the sealed artifacts: **8 findings, 0 critical, 0 high, 6 medium, 2 low** - PASS at the
+high threshold. But an addendum finding was produced *after* the manifest was sealed, so it is not in
+that count, and it was **high**:
+
+> **Revoked artifact trust can be silently reinstated and re-promoted through the gated `evaluate`
+> action.** `ArtifactRegistry.evaluate` wrote `trust = VALIDATED` for any passing check without
+> consulting the current trust, and the revocation rule only inspected the acting session's own
+> artifact.
+
+**Reproduced with the scanner's own POC** (`poc-a-revocation.mjs`), before the fix:
+
+```
+A1 revoke effect: ALLOW | trust now: REVOKED
+A2 impl action after revoke: BLOCK TRUST_REVOKED | executed: false
+A3 evaluate revoked artifact: ALLOW ALLOWED | trust now: VALIDATED | lifecycle: VALIDATED   <-- the bypass
+A4 impl action after re-evaluation: ALLOW ALLOWED | executed: true                          <-- work resumed
+A5 release revived artifact: ALLOW ALLOWED
+A6 promote revived artifact: ALLOW ALLOWED | trust: TRUSTED
+```
+
+**After the fix**, the same POC:
+
+```
+A1 revoke effect: ALLOW | trust now: REVOKED
+A2 impl action after revoke: BLOCK TRUST_REVOKED | executed: false
+A3 evaluate revoked artifact: BLOCK EVALUATION_OF_REVOKED_ARTIFACT | trust now: REVOKED | lifecycle: REVOKED
+A4 impl action after re-evaluation: BLOCK TRUST_REVOKED | executed: false
+A5 -> the exploit chain dies: RELEASE_NEEDS_EVALUATION (a revoked artifact cannot be released)
+```
+
+Revocation is now terminal: `evaluate` refuses a REVOKED or SUPERSEDED artifact, and policy rule
+`P08b` refuses it at the gate. Pinned by test **A18** and gate mutation **revocation-is-terminal**.
+Un-revocation is deliberately not supported in this prototype.
+
+### The six medium findings, all in one family: caller-supplied identity and scope
+
+| # | Finding | Fix |
+|---|---|---|
+| M1 | An agent can grant its own external-action approval and satisfy the approval rule | approval independence is now decided by the *approving session's* agent, and the approving agent is recorded (`approvedByAgent`) alongside the free-text `approvedBy` label |
+| M2 | Artifact evaluation and promotion independence is decided by caller-supplied name strings | the evaluator/releaser/promoter/roller-back/revoker is the agent the **grant** identifies, never `params.by` |
+| M3 | External-action approval scope is not bound to the operation the executor runs | policy `P19b`: the request target must equal the approved target, or `EXTERNAL_TARGET_MISMATCH` |
+| M4 | Runtime resource exclusion is enforced against a caller-supplied task id | policy `P17`/`P18` take the task from the **session**, not the request |
+| M5 | Agent role is caller-asserted and never checked against the artifact definition | `createAgent` refuses a role that disagrees with the artifact's declared role (`AGENT_ROLE_MISMATCH`) |
+| M6 | A task can be marked done citing a verification not bound to its work | a PASS binds `task.implementationExecutionId`; `mark_done` refuses any other verification (`DONE_VERIFICATION_NOT_BOUND`) |
+
+Pinned by tests **A19** and the updated **A05/A06/A16/A17**.
+
+### What this round does NOT establish
+
+The security fixes (the high finding and M1-M6) have been confirmed **only by the implementer**, by
+re-running the scanner's own POC and the suite. They have **not** been through an independent
+verification round - the 天枢 rounds that succeeded ran against the tree as it stood before them. A
+fresh scan was started against the hardened tree and its result is not in this document yet.
+Recording that gap is the point: "fixed" and "independently confirmed fixed" are different claims.
+
 **A test suite tests the API you intended; an adversary tests the API you shipped.**
 
 The 34 tests passed, the benchmark reported 12/12 prevented and the gate caught 7 injected faults -

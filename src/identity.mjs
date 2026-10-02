@@ -250,6 +250,19 @@ export class ArtifactRegistry {
   evaluate(input) {
     const record = this.current(input.artifactId);
     const checks = Array.isArray(input.checks) ? input.checks : [];
+    // REVOCATION IS TERMINAL. Without this, `evaluate` silently rewrote trust back to VALIDATED,
+    // so an agent holding the evaluate role could un-revoke a definition an operator had
+    // deliberately killed, resume work under it, and re-promote it. Reproduced end to end
+    // (A1-A6) by a security scan; it defeated invariant I17 outright.
+    if (record.trust === 'REVOKED') {
+      throw new Refusal('EVALUATION_OF_REVOKED_ARTIFACT',
+        'artifact ' + input.artifactId + ' trust was revoked (' + String(record.revokedReason) +
+        '); an evaluation cannot reinstate it');
+    }
+    if (record.trust === 'SUPERSEDED') {
+      throw new Refusal('EVALUATION_OF_SUPERSEDED_ARTIFACT',
+        'artifact ' + input.artifactId + ' was superseded by ' + String(record.supersededBy));
+    }
     if (!input.by) throw new Refusal('EVALUATION_NEEDS_EVALUATOR', 'an evaluation must name its evaluator');
     if (record.createdBy && input.by === record.createdBy) {
       throw new Refusal('SELF_EVALUATION', 'the author of an artifact may not evaluate it: ' + input.by);

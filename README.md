@@ -32,9 +32,9 @@ Node 18+, zero dependencies.
 
 ```bash
 node bin/demo.mjs          # the governed path, twelve attacks, and the audit
-node --test "test/*.test.mjs"   # 36 checks: 16 invariant tests, 20 attack tests
+node --test "test/*.test.mjs"   # 38 checks: 16 invariant tests, 22 attack tests
 node bench/benchmark.mjs   # naive vs governed vs governed+runtime (positive control first)
-node scripts/gate.mjs      # the suite, the benchmark, and seven injected faults that must be caught
+node scripts/gate.mjs      # the suite, the benchmark, and eight injected faults that must be caught
 ```
 
 ## Measured, not asserted

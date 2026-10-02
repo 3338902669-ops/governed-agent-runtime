@@ -181,6 +181,9 @@ export async function createControlPlane(options) {
           if (record.verdict === 'PASS') {
             task.verificationId = record.verificationId;
             task.verificationSubjectAgentId = record.subjectAgentId;
+            // What this task's work actually IS. Without binding it, a done claim could cite any
+            // passing verification in the ledger, including one about unrelated work.
+            task.implementationExecutionId = record.subjectExecutionId;
             task.state = 'verified';
           } else {
             task.verificationId = null;
@@ -194,6 +197,14 @@ export async function createControlPlane(options) {
         const taskId = args.taskId || target;
         const task = requireTask(taskId);
         const verificationId = args.verificationId || task.verificationId;
+        // The verification must be of THIS task's work.
+        const cited = ledger.verifications.get(verificationId);
+        if (!cited) throw new Refusal('DONE_WITH_UNKNOWN_VERIFICATION', 'no verification ' + String(verificationId));
+        if (!task.implementationExecutionId || cited.subjectExecutionId !== task.implementationExecutionId) {
+          throw new Refusal('DONE_VERIFICATION_NOT_BOUND',
+            'the cited verification is of execution ' + cited.subjectExecutionId +
+            ', but this task\'s work is ' + String(task.implementationExecutionId));
+        }
         const fact = ledger.assertFact({
           key: 'task:' + taskId + ':state',
           value: 'done',
@@ -207,7 +218,9 @@ export async function createControlPlane(options) {
       case 'evaluate': {
         const evaluated = registry.evaluate({
           artifactId: target,
-          by: args.by,
+          // The evaluator is the agent the GRANT identifies. Taking `by` from caller params let a
+          // caller name somebody else and satisfy the independence rule by assertion.
+          by: agentId,
           byRole: args.byRole || null,
           checks: args.checks,
           at: clock(),
@@ -221,23 +234,23 @@ export async function createControlPlane(options) {
         return evaluated;
       }
       case 'mutate_artifact': {
-        const mutated = registry.mutate({ artifactId: target, patch: args.patch, by: args.by, at: clock() });
+        const mutated = registry.mutate({ artifactId: target, patch: args.patch, by: agentId, at: clock() });
         ledger.append('artifact.mutated', {
           artifactId: target,
           from: mutated.previous.definitionHash,
           to: mutated.current.definitionHash,
-          by: args.by || null,
+          by: agentId,
         });
         return mutated;
       }
       case 'release':
-        return registry.release({ artifactId: target, by: args.by || agentId, at: clock() });
+        return registry.release({ artifactId: target, by: agentId, at: clock() });
       case 'promote':
-        return registry.promote({ artifactId: target, by: args.by || agentId, approval: args.approval, at: clock() });
+        return registry.promote({ artifactId: target, by: agentId, approval: args.approval, at: clock() });
       case 'rollback':
-        return registry.rollback({ artifactId: target, toVersion: args.toVersion, by: args.by || agentId, at: clock() });
+        return registry.rollback({ artifactId: target, toVersion: args.toVersion, by: agentId, at: clock() });
       case 'revoke':
-        return registry.revoke({ artifactId: target, reason: args.reason, by: args.by || agentId, at: clock() });
+        return registry.revoke({ artifactId: target, reason: args.reason, by: agentId, at: clock() });
       case 'approve': {
         const session = requireSession(args.sessionId);
         // The governance engine records the approval that unlocks dispatch. If it refuses, the
@@ -248,6 +261,7 @@ export async function createControlPlane(options) {
         }
         const approval = {
           approvedBy: args.approvedBy,
+          approvedByAgent: args.approvedByAgent || null,
           scope: args.scope,
           sessionId: session.sessionId,
           agentId: session.agentId,
@@ -381,6 +395,12 @@ export async function createControlPlane(options) {
 
   function createAgentFromArtifact(input) {
     const current = registry.current(input.artifactId);
+    // The role is a property of the ARTIFACT, not a label the caller asserts. Without this an agent
+    // could be built from an implementer artifact and claim the coordinator role.
+    if (input.roleId && input.roleId !== current.roleId) {
+      throw new Refusal('AGENT_ROLE_MISMATCH',
+        'artifact ' + input.artifactId + ' declares role ' + current.roleId + ', not ' + String(input.roleId));
+    }
     const identity = createAgent({
       ...input,
       artifactVersion: current.version,
@@ -489,9 +509,14 @@ export async function createControlPlane(options) {
     const approverSession = requireSession(input.sessionId);
     const targetSession = requireSession(input.targetSessionId || input.sessionId);
     const approver = agents.get(approverSession.agentId);
-    if (input.approvedBy === targetSession.agentId) {
+    // Independence is decided by the SESSION's agent, not by the `approvedBy` string the caller
+    // supplies: otherwise an agent satisfies the approval rule by typing somebody else's name.
+    if (approverSession.agentId === targetSession.agentId) {
       throw new Refusal('SELF_APPROVAL', 'an agent may not approve its own external action');
     }
+    // `approvedBy` stays a human-facing attribution string (unauthenticated - KNOWN-FINDINGS
+    // F-GAR-08). What is now recorded alongside it is the AGENT that actually approved, so the
+    // session-independence check above is a fact about sessions rather than a claim in a name.
     const submitted = await runtime.submit({
       sessionId: approverSession.sessionId,
       agentId: approverSession.agentId,
@@ -511,6 +536,8 @@ export async function createControlPlane(options) {
       args: {
         sessionId: targetSession.sessionId,
         approvedBy: input.approvedBy,
+        // The grant identifies who is really approving; the name above is only a label.
+        approvedByAgent: approverSession.agentId,
         scope: input.scope,
         expiresAt: input.expiresAt || null,
       },

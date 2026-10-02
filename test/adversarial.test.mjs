@@ -116,7 +116,7 @@ test('A05: an agent uses an expired approval', async () => {
 
   world.clock.advance(3600000);
   const deploy = await world.cp.act(request(work.sImpl, 'execute', {
-    target: 'deploy-runner',
+    target: 'production',
     tool: 'shell',
     externalAction: { kind: 'deploy', target: 'production' },
   }));
@@ -134,7 +134,7 @@ test('A06: an agent replays an old approval or an old grant', async () => {
   // A fresh session for the same agent does not inherit the approval: there is nothing to replay.
   const fresh = await world.cp.openSession({ agentId: 'agent-impl', taskId: work.task.taskId });
   const deploy = await world.cp.act(request(fresh, 'execute', {
-    target: 'deploy-runner', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' },
+    target: 'production', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' },
   }));
   const receipt = refused(deploy, 'replayed approval');
   assert.equal(receipt.code, 'EXTERNAL_ACTION_UNAPPROVED');
@@ -152,7 +152,7 @@ test('A06b: the approval-binding rule fires when an approval is moved to another
   const world = await makeWorld();
   const work = await openWork(world);
   const receipt = authorize({
-    request: { sessionId: 'session-b', agentId: 'agent-impl', taskId: work.task.taskId, action: 'execute', target: 'deploy-runner', externalAction: { kind: 'deploy', target: 'production' } },
+    request: { sessionId: 'session-b', agentId: 'agent-impl', taskId: work.task.taskId, action: 'execute', target: 'production', externalAction: { kind: 'deploy', target: 'production' } },
     session: { sessionId: 'session-b', agentId: 'agent-impl', artifactId: world.artifacts.impl.artifactId, definitionHash: 'h', identityHash: 'i', taskId: work.task.taskId, approval: { approved: true, approvedBy: 'human-root', scope: 'production', sessionId: 'session-a', agentId: 'agent-impl' } },
     identity: { agentId: 'agent-impl', identityFingerprint: 'i' },
     role: { roleId: 'implementer', lifecycle: 'ACTIVE', permissions: { allow: ['execute'], deny: [] }, allowedTools: ['shell'], allowedResources: ['*'] },
@@ -362,6 +362,63 @@ test('A17: an execution cannot be recorded without a grant the gate consumed', a
   // d) the forged chain from finding C2 is impossible end to end
   assert.throws(() => L.recordEvidence({ executionId: 'exec-forged', author: 'agent-impl', grade: 'E3' }), (e) => e.code === 'EVIDENCE_WITHOUT_EXECUTION');
   assert.equal(world.cp.systemFact('forged:state'), null);
+});
+
+test('A18: revoked trust cannot be reinstated by evaluating the artifact', async () => {
+  // The A1-A6 sequence a security scan reproduced: revoke -> evaluate -> work resumes -> re-promote.
+  const world = await makeWorld();
+  const artifactId = world.artifacts.impl.artifactId;
+  const coord = await world.cp.openSession({ agentId: 'agent-coord', own: false });
+  const revoked = await world.cp.revokeTrust({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, reason: 'incident response' });
+  assert.equal(revoked.receipt.effect, 'ALLOW');
+  assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
+
+  // A2: no agent built from the revoked definition can even open a session
+  await assert.rejects(() => world.cp.openSession({ agentId: 'agent-impl', own: false }), (e) => e.code === 'ARTIFACT_NOT_TRUSTED');
+
+  // A3: the revive step is refused at the gate and in the registry
+  const evalSession = await world.cp.openSession({ agentId: 'agent-eval', own: false });
+  const revived = await world.cp.act(request(evalSession, 'evaluate', { target: artifactId, params: { checks: [{ name: 'x', passed: true }] } }));
+  assert.equal(refused(revived, 'evaluating a revoked artifact').code, 'EVALUATION_OF_REVOKED_ARTIFACT');
+  assert.throws(
+    () => world.cp.registry.evaluate({ artifactId, by: 'agent-eval', checks: [{ name: 'x', passed: true }] }),
+    (e) => e.code === 'EVALUATION_OF_REVOKED_ARTIFACT',
+  );
+
+  // A4-A6: trust stays revoked, so release and promotion stay shut
+  assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
+  await assert.rejects(
+    () => world.cp.releaseArtifact({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId }),
+    (e) => e.code === 'RELEASE_NEEDS_EVALUATION',
+  );
+
+  // and the delegation chain cannot be satisfied by naming somebody else
+  const evalSession2 = await world.cp.openSession({ agentId: 'agent-eval', own: false });
+  const forged = await world.cp.act(request(evalSession2, 'evaluate', { target: world.artifacts.eval.artifactId, params: { checks: [{ name: 'ok', passed: true }], by: 'someone-else' } }));
+  assert.equal(forged.receipt.effect, 'ALLOW');
+  assert.equal(world.cp.artifact(world.artifacts.eval.artifactId).evaluations.slice(-1)[0].by, 'agent-eval', 'the evaluator is the session agent, not the name in the request');
+});
+
+test('A19: a done claim must cite a verification of this task\'s own work', async () => {
+  const world = await makeWorld();
+  const work = await openWork(world);
+  const first = await runHappyPath(world, work);
+
+  const other = world.cp.createTask({ title: 'unrelated work', resources: ['file:src/b.mjs'] });
+  const oImpl = await world.cp.openSession({ agentId: 'agent-impl', taskId: other.taskId });
+  const oVerify = await world.cp.openSession({ agentId: 'agent-verify', taskId: other.taskId, own: false });
+  const oCoord = await world.cp.openSession({ agentId: 'agent-coord', own: false });
+  const oWrite = await world.cp.act(request(oImpl, 'write', { target: 'file:src/b.mjs', resource: 'file:src/b.mjs', tool: 'edit', params: {} }));
+  const oEv = await world.cp.produceEvidence({ sessionId: oImpl.sessionId, agentId: 'agent-impl', taskId: other.taskId, executionId: oWrite.executionId, params: { grade: 'E3', note: 'other work' } });
+  const oVer = await world.cp.verify({ sessionId: oVerify.sessionId, agentId: 'agent-verify', taskId: other.taskId, subjectExecutionId: oWrite.executionId, subjectAgentId: 'agent-impl', verdict: 'PASS', criteria: ['other'], evidenceIds: [oEv.result.evidenceId] });
+  assert.equal(oVer.receipt.effect, 'ALLOW');
+
+  // The unrelated verification exists and passes, but it is not this task's work.
+  await assert.rejects(
+    () => world.cp.markDone({ sessionId: oCoord.sessionId, agentId: 'agent-coord', taskId: other.taskId, verificationId: first.verification.result.verificationId }),
+    (e) => e.code === 'DONE_VERIFICATION_NOT_BOUND',
+  );
+  assert.equal(world.cp.systemFact('task:' + other.taskId + ':state'), null);
 });
 
 test('A15b: the audit detects a runtime that diverged from governance', async () => {
