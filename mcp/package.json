@@ -1,0 +1,13 @@
+{
+  "name": "governed-agent-runtime-audit-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only MCP adapter for the governed-agent-runtime auditor. It reports whether a record is evidence; it never blocks anything.",
+  "bin": { "gar-audit-mcp": "server.mjs" },
+  "scripts": { "test": "node --test test/protocol.test.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.6.5"
+  }
+}

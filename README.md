@@ -77,6 +77,38 @@ actor can ignore.** The first two columns are executable models of non-cooperati
 measurements of a deployed system - see [bench/RESULTS.md](bench/RESULTS.md) for the methodology and
 its limits.
 
+## MCP adapter (optional, read-only)
+
+`mcp/` exposes the auditor over the Model Context Protocol, so any MCP client can ask whether a
+ledger export is admissible evidence. It is a separate package because the core of this repository is
+zero-dependency with no build step, and that is worth keeping.
+
+```bash
+cd mcp && npm install
+node mcp/server.mjs          # stdio
+```
+
+Register it with an MCP client:
+
+```json
+{ "mcpServers": { "gar-audit": { "command": "node", "args": ["<repo>/mcp/server.mjs"] } } }
+```
+
+| tool | what it does |
+|---|---|
+| `audit_ledger` | re-checks a ledger export (inline, or by path) against the seven claims; returns HOLDS / FAILS / UNKNOWN per claim |
+| `list_audit_claims` | lists the seven claims and what each asserts |
+
+Both are annotated `readOnlyHint: true`. There is deliberately **no tool that grants, approves,
+promotes, revokes or blocks**: an adapter that could decide authority would inherit the unclosed
+authorisation surface the scans kept finding. The adapter reports; it never blocks.
+
+Its protocol suite is 3 tests (`cd mcp && npm test`) which spawn the server and speak JSON-RPC over
+stdio, rather than calling the handler directly.
+
+When scanning this repository, point the scanner at `src,test,bin,scripts,bench,mcp/server.mjs`:
+`mcp/node_modules` is an install artefact, not part of the deliverable.
+
 ## The object model
 
 ```

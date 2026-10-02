@@ -22,17 +22,20 @@ const INVARIANTS = countTests('test/invariants.test.mjs');
 const ATTACKS = countTests('test/adversarial.test.mjs');
 const AUDITOR = countTests('test/auditor.test.mjs');
 const TESTS = INVARIANTS + ATTACKS + AUDITOR;
+// The MCP adapter is a separate package with its own dependency, so its protocol suite is counted
+// separately - but it is still counted, because a number in the prose is a claim either way.
+const MCP = countTests('mcp/test/protocol.test.mjs');
 
 const gateSource = readFileSync(join(REPO, 'scripts/gate.mjs'), 'utf8');
 const mutations = gateSource.slice(gateSource.indexOf('const MUTATIONS = ['), gateSource.indexOf('];', gateSource.indexOf('const MUTATIONS = [')));
 const MUTATIONS = (mutations.match(/^    id: '/gm) || []).length;
 
-export const live = { tests: TESTS, invariants: INVARIANTS, attacks: ATTACKS, auditor: AUDITOR, mutations: MUTATIONS };
+export const live = { tests: TESTS, invariants: INVARIANTS, attacks: ATTACKS, auditor: AUDITOR, mcp: MCP, mutations: MUTATIONS };
 
 const DOCS = ['README.md', 'VERIFICATION.md', 'SECURITY-SCAN-LOG.md', 'bench/RESULTS.md', 'INVARIANTS.md'];
 
 /** Numbers that may legitimately appear next to these words. */
-const ALLOWED_NEAR_TEST = new Set([TESTS, INVARIANTS, ATTACKS, AUDITOR]);
+const ALLOWED_NEAR_TEST = new Set([TESTS, INVARIANTS, ATTACKS, AUDITOR, MCP]);
 
 const problems = [];
 
@@ -71,7 +74,7 @@ if (problems.length) {
   process.exitCode = 1;
 } else {
   console.log('claims: ' + TESTS + ' tests (' + INVARIANTS + ' invariants + ' + ATTACKS + ' attacks + ' +
-    AUDITOR + ' auditor), ' + MUTATIONS + ' injected faults - every document agrees');
+    AUDITOR + ' auditor) + ' + MCP + ' MCP protocol tests, ' + MUTATIONS + ' injected faults - every document agrees');
 }
 
 export default live;
