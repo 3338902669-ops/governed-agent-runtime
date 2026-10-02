@@ -306,6 +306,24 @@ export const RULES = [
     },
   },
   {
+    id: 'P18b',
+    invariant: 'I2',
+    code: 'RESOURCE_CONFLICT',
+    when(ctx) {
+      // A session bound to no task used to skip resource exclusion entirely, because P18 keys on the
+      // session's task. A verifier legitimately runs commands without a task, so this cannot be a
+      // blanket denial: what it must not do is touch a resource another live task holds.
+      if (!ctx.session || ctx.session.taskId) return null;
+      if (!ctx.request.resource) return null;
+      if (!ctx.governance || !ctx.governance.available) return null;
+      const holder = ctx.governance.resourceHolder(ctx.request.resource);
+      if (!holder) return null;
+      return decision('DENY', 'RESOURCE_CONFLICT',
+        'resource "' + ctx.request.resource + '" is held by task ' + holder.taskId +
+        ' (' + holder.owner + '), and this session is bound to no task', 'I2');
+    },
+  },
+  {
     id: 'P19',
     invariant: 'I12',
     code: 'EXTERNAL_ACTION_UNAPPROVED',

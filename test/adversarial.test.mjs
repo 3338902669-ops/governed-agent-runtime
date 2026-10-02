@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorld, openWork, request, runHappyPath } from './harness.mjs';
 import { authorize } from '../src/policy.mjs';
+import { createControlPlane } from '../src/control-plane.mjs';
 import { Refusal } from '../src/core.mjs';
 
 const REFUSALS = ['DENY', 'BLOCK', 'REQUIRE_VERIFICATION', 'REQUIRE_APPROVAL'];
@@ -305,30 +306,67 @@ test('A15: governance blocks the task behind the runtime and the runtime keeps g
 });
 
 test('A16: the surface a runner gets cannot mint a grant, an execution or a fact', async () => {
-  // Default surface: internals are NOT attached. This test exists because an independent
-  // verification round walked straight through the exposed ledger (finding C1).
-  const world = await makeWorld({ internals: false });
-  await openWork(world);
-  assert.equal(world.cp.describe().internalsExposed, false);
+  // This test exists because an independent verification round walked straight through the exposed
+  // ledger (finding C1). runnerSurface() is exactly what a runner is handed.
+  const world = await makeWorld();
+  const runner = world.cp.runnerSurface();
+  assert.equal(runner.describe().internalsExposed, false);
 
-  assert.equal(world.cp.ledger.issueGrant, undefined, 'the public ledger must not mint grants');
-  assert.equal(world.cp.ledger.recordExecution, undefined);
-  assert.equal(world.cp.ledger.recordEvidence, undefined);
-  assert.equal(world.cp.ledger.assertFact, undefined);
-  assert.equal(world.cp.ledger.consumeGrant, undefined);
-  assert.equal(world.cp.registry.mutate, undefined);
-  assert.equal(world.cp.registry.evaluate, undefined);
-  assert.equal(world.cp.registry.promote, undefined);
-  assert.equal(world.cp.governance.blockTask, undefined);
-  assert.equal(world.cp.governance.sever, undefined);
-  assert.equal(world.cp.memory.write, undefined);
+  assert.equal(runner.ledger.issueGrant, undefined, 'the runner ledger must not mint grants');
+  assert.equal(runner.ledger.recordExecution, undefined);
+  assert.equal(runner.ledger.recordEvidence, undefined);
+  assert.equal(runner.ledger.assertFact, undefined);
+  assert.equal(runner.ledger.consumeGrant, undefined);
+  assert.equal(runner.registry.mutate, undefined);
+  assert.equal(runner.registry.evaluate, undefined);
+  assert.equal(runner.registry.promote, undefined);
+  assert.equal(runner.governance.blockTask, undefined);
+  assert.equal(runner.governance.sever, undefined);
+  assert.equal(runner.memory.write, undefined);
 
   // Reading is still possible; minting is not.
-  assert.equal(typeof world.cp.ledger.verifyChain, 'function');
-  assert.equal(typeof world.cp.registry.current, 'function');
+  assert.equal(typeof runner.ledger.verifyChain, 'function');
+  assert.equal(typeof runner.registry.current, 'function');
 
-  await assert.rejects(() => world.cp.runtime.execute('grant-forged', {}), (e) => /GRANT_UNKNOWN/.test(e.message));
+  await assert.rejects(() => runner.runtime.execute('grant-forged', {}), (e) => /GRANT_UNKNOWN/.test(e.message));
   assert.equal(world.calls.length, 0);
+});
+
+test('A16b: a control plane built WITHOUT the privileged opt-in exposes read-only surfaces', async () => {
+  // This pins the construction-time choice itself, not just the runner view derived from it.
+  const cp = await createControlPlane();
+  assert.equal(cp.describe().internalsExposed, false);
+  assert.equal(cp.describe().operatorSurfaceExposed, false);
+  assert.equal(cp.ledger.issueGrant, undefined);
+  assert.equal(cp.ledger.recordExecution, undefined);
+  assert.equal(cp.registry.mutate, undefined);
+  assert.equal(cp.governance.blockTask, undefined);
+  assert.equal(Object.isFrozen(cp.ledger), true);
+  assert.equal(Object.isFrozen(cp.registry), true);
+  assert.throws(() => cp.registerArtifact({ name: 'rogue', roleId: 'coordinator' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+});
+
+test('A20: a runner holding the surface cannot escalate by minting identity or trust', async () => {
+  // The security scan's high finding: registerArtifact + bootstrapTrust + createAgent on the same
+  // object let a holder mint a coordinator artifact, trust it, mint a matching agent and act with
+  // coordinator authority. Every step of that chain must be shut.
+  const world = await makeWorld();
+  const runner = world.cp.runnerSurface();
+
+  assert.throws(() => runner.registerArtifact({ name: 'rogue', roleId: 'coordinator' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+  assert.throws(() => runner.bootstrapTrust({ artifactId: world.artifacts.coord.artifactId }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+  assert.throws(() => runner.createAgent({ agentId: 'agent-rogue', artifactId: world.artifacts.coord.artifactId }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+
+  // and the role cannot be smuggled in by building an agent from somebody else's artifact
+  assert.equal(typeof runner.createAgent, 'function'); // it exists, it refuses
+
+  // The operator surface still works, so the refusal is a boundary and not a broken method.
+  const minted = world.cp.createAgent({ agentId: 'agent-coord-2', artifactId: world.artifacts.coord.artifactId, roleId: 'coordinator' });
+  assert.equal(minted.roleId, 'coordinator');
+  assert.throws(
+    () => world.cp.createAgent({ agentId: 'agent-escalated', artifactId: world.artifacts.impl.artifactId, roleId: 'coordinator' }),
+    (e) => e.code === 'AGENT_ROLE_MISMATCH',
+  );
 });
 
 test('A17: an execution cannot be recorded without a grant the gate consumed', async () => {
@@ -419,6 +457,27 @@ test('A19: a done claim must cite a verification of this task\'s own work', asyn
     (e) => e.code === 'DONE_VERIFICATION_NOT_BOUND',
   );
   assert.equal(world.cp.systemFact('task:' + other.taskId + ':state'), null);
+});
+
+test('A21: a verifier bound to a task cannot pass off unrelated work as that task\'s', async () => {
+  const world = await makeWorld();
+  const a = await openWork(world, { title: 'task A', resources: ['file:src/a.mjs'] });
+  const b = world.cp.createTask({ title: 'task B', resources: ['file:src/b.mjs'] });
+  const bImpl = await world.cp.openSession({ agentId: 'agent-impl', taskId: b.taskId });
+  const bWrite = await world.cp.act(request(bImpl, 'write', { target: 'file:src/b.mjs', resource: 'file:src/b.mjs', tool: 'edit', params: {} }));
+  assert.equal(bWrite.receipt.effect, 'ALLOW');
+
+  // The verifier's session is bound to task A; the subject execution belongs to task B.
+  await assert.rejects(
+    () => world.cp.verify({
+      sessionId: a.sVerify.sessionId, agentId: 'agent-verify', taskId: a.task.taskId,
+      subjectExecutionId: bWrite.executionId, subjectAgentId: 'agent-impl',
+      verdict: 'PASS', criteria: ['x'], evidenceIds: ['any'],
+    }),
+    (e) => e.code === 'VERIFICATION_OF_FOREIGN_WORK',
+  );
+  // On the privileged surface `verifications` is the raw Map (see KNOWN-FINDINGS F-GAR-10).
+  assert.equal(world.cp.ledger.verifications.size, 0);
 });
 
 test('A15b: the audit detects a runtime that diverged from governance', async () => {

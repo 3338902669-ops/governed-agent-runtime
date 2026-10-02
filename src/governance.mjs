@@ -126,6 +126,19 @@ export class GovernanceBridge {
     }
   }
 
+  /** Which live task holds this resource, if any. Used when a session is bound to no task. */
+  resourceHolder(resource) {
+    if (!this.lib || !resource) return null;
+    const want = String(resource).toLowerCase();
+    for (const task of Object.values(this.state.tasks)) {
+      if (!task.lock) continue;
+      if (task.status === 'done' || task.status === 'blocked') continue;
+      const hit = (task.resources || []).find(function (r) { return String(r).toLowerCase() === want; });
+      if (hit) return { taskId: task.id, owner: task.lock.owner, resource: hit };
+    }
+    return null;
+  }
+
   isBlocked(taskId) {
     this.#require();
     const task = this.state.tasks[taskId];

@@ -23,9 +23,9 @@ export async function makeWorld(options) {
     executor: opts.executor || spyExecutor,
     governance: opts.governance,
     grantTtlMs: opts.grantTtlMs,
-    // The fixture asks for the privileged surface because its adversarial cases simulate an
-    // already-compromised process (tampering with a stored definition, driving the governance
-    // engine into a block). Pass internals:false to get exactly the surface a runner would get.
+    // The fixture asks for the privileged surface because it must REGISTER artifacts and MINT
+    // agents to build a world at all, and its adversarial cases simulate an already-compromised
+    // process. Pass internals:false to get exactly the surface a runner would get (A16/A20).
     internals: opts.internals === undefined ? true : opts.internals === true,
   });
 

@@ -16,7 +16,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { INCIDENTS } from './incidents.mjs';
-import { makeWorld, openWork, runHappyPath } from '../src/fixture.mjs';
+import { makeWorld, openWork, request, runHappyPath } from '../src/fixture.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Overridable so a verifier can run the benchmark without writing into the repository it audits.
@@ -43,6 +43,20 @@ async function positiveControl() {
     if (!happy.verification.result || happy.verification.result.verdict !== 'PASS') problems.push('the independent verification did not pass');
     const fact = world.cp.systemFact('task:' + work.task.taskId + ':state');
     if (!fact || fact.value !== 'done') problems.push('the authoritative fact was not established');
+
+    // LIVENESS for the external-action incidents: the counter they assert on must be able to move.
+    // A security scan found that runtime.execute never passed the external descriptor through, so
+    // `externalCalls` could never be non-zero and two incidents were vacuously "prevented".
+    const ext = await openWork(world, { title: 'approved deploy', resources: ['file:src/ext.mjs'], externalAction: 'deploy', externalTarget: 'production' });
+    const approver = await world.cp.openSession({ agentId: 'agent-coord', own: false });
+    const approved = await world.cp.approve({ sessionId: approver.sessionId, targetSessionId: ext.sImpl.sessionId, approvedBy: 'human-root', scope: 'production' });
+    if (!approved.executed) problems.push('an external action could not even be approved: ' + approved.receipt.code);
+    const deploy = await world.cp.act(request(ext.sImpl, 'execute', { target: 'production', tool: 'shell', externalAction: { kind: 'deploy', target: 'production' } }));
+    if (deploy.receipt.effect !== 'ALLOW') problems.push('an approved external action was not allowed: ' + deploy.receipt.code);
+    if (world.cp.externalCalls().length !== 1) {
+      problems.push('an approved external action did not reach the external executor (externalCalls=' +
+        world.cp.externalCalls().length + '), so the external incidents assert on a counter that never moves');
+    }
   } catch (error) {
     problems.push('the happy path threw: ' + String(error && error.message ? error.message : error));
   }

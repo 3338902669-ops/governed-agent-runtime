@@ -45,6 +45,20 @@ const MUTATIONS = [
     caughtBy: 'an expired approval still authorises an external action',
   },
   {
+    id: 'runner-surface-inherits-raw',
+    file: 'src/control-plane.mjs',
+    find: '    view.ledger = readOnlyLedger(ledger);',
+    replace: '    view.ledger = ledger;',
+    caughtBy: 'the runner-facing view hands back the minting ledger',
+  },
+  {
+    id: 'verification-of-foreign-work',
+    file: 'src/control-plane.mjs',
+    find: '        if (boundTaskId && (!subjectExecution || subjectExecution.taskId !== boundTaskId)) {',
+    replace: '        if (false) {',
+    caughtBy: 'a verifier can bind unrelated work to its task',
+  },
+  {
     id: 'revocation-is-terminal',
     file: 'src/identity.mjs',
     find: "    if (record.trust === 'REVOKED') {",

@@ -81,6 +81,10 @@ export class Ledger {
       target: input.target,
       resource: input.resource === undefined ? null : input.resource,
       decisionCode: input.decisionCode,
+      // The external descriptor travels WITH the grant, so the executor can be told what kind of
+      // external action it is running. Without it the runtime never passed `external` through and
+      // the external executor was unreachable - which made two benchmark incidents vacuous.
+      external: input.external === undefined ? null : input.external,
       runtimeId: input.runtimeId === undefined ? null : input.runtimeId,
       issuedAt: this.#at(),
       expiresAt: input.expiresAt,
@@ -154,6 +158,9 @@ export class Ledger {
       action: input.action,
       target: input.target,
       resource: input.resource === undefined ? null : input.resource,
+      // Which task this execution belongs to. A verification may only be about work from its own
+      // task; without this, a verifier could nominate unrelated work as a task's implementation.
+      taskId: input.taskId === undefined ? null : input.taskId,
       startedAt: input.startedAt || this.#at(),
       finishedAt: this.#at(),
       outcome: input.outcome,

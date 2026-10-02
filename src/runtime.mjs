@@ -91,6 +91,7 @@ export function createGovernedRuntime(options) {
         resource: request.resource === undefined ? null : request.resource,
         decisionCode: receipt.code,
         expiresAt,
+        external: request.externalAction === undefined ? null : request.externalAction,
         runtimeId,
       });
       return { receipt, granted: true, grantId: grant.grantId, expiresAt };
@@ -138,6 +139,11 @@ export function createGovernedRuntime(options) {
           // The acting identity comes from the GRANT, never from caller-supplied arguments.
           agentId: head.agentId,
           sessionId: head.sessionId,
+          // The external descriptor travels with the grant, so an approved external action actually
+          // reaches the external executor. Without it that branch was unreachable and two benchmark
+          // incidents asserted on a counter that could never move.
+          external: head.external === undefined ? null : head.external,
+          taskId: gate.taskId === undefined ? null : gate.taskId,
         });
       } catch (error) {
         failure = error;
@@ -149,6 +155,7 @@ export function createGovernedRuntime(options) {
         action: head.action,
         target: head.target,
         resource: head.resource,
+        taskId: gate.taskId === undefined ? null : gate.taskId,
         startedAt,
         outcome: failure ? 'error' : 'ok',
         produced: failure ? String(failure && failure.message ? failure.message : failure) : result,

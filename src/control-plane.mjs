@@ -128,7 +128,9 @@ export async function createControlPlane(options) {
     }
     const chain = ledger.verifyChain();
     if (!chain.ok) return { ok: false, code: 'LEDGER_TAMPERED', effect: 'BLOCK', reason: 'ledger chain broken at row ' + chain.brokenAt };
-    return { ok: true };
+    // The task binding is re-derived from the SESSION at execution time and travels with the
+    // execution, so a verification cannot later be pointed at unrelated work.
+    return { ok: true, taskId: session.taskId === undefined ? null : session.taskId };
   }
 
   // -------------------------------------------------------- state actions
@@ -167,6 +169,16 @@ export async function createControlPlane(options) {
         });
       }
       case 'verify': {
+        // The task is read from the VERIFIER'S SESSION, not from args. Taking it from the caller let
+        // a verifier nominate any passing verification as an unrelated task's implementation.
+        const verifierSession = sessions.get(invocation.sessionId);
+        const boundTaskId = verifierSession && verifierSession.taskId ? verifierSession.taskId : null;
+        const subjectExecution = ledger.executions.get(args.subjectExecutionId || target);
+        if (boundTaskId && (!subjectExecution || subjectExecution.taskId !== boundTaskId)) {
+          throw new Refusal('VERIFICATION_OF_FOREIGN_WORK',
+            'the verification subject belongs to task ' + String(subjectExecution && subjectExecution.taskId) +
+            ', but this session is bound to ' + boundTaskId);
+        }
         const record = ledger.recordVerification({
           verifierAgentId: agentId,
           subjectExecutionId: args.subjectExecutionId || target,
@@ -175,7 +187,7 @@ export async function createControlPlane(options) {
           evidenceIds: args.evidenceIds,
           findings: args.findings,
         });
-        const taskId = args.taskId;
+        const taskId = boundTaskId;
         if (taskId && tasks.has(taskId)) {
           const task = tasks.get(taskId);
           if (record.verdict === 'PASS') {
@@ -659,6 +671,13 @@ export async function createControlPlane(options) {
   }
 
   const exposeInternals = opts.internals === true;
+  /** Present so a runner gets a loud refusal instead of silently missing a method. */
+  function operatorOnly(name) {
+    return function () {
+      throw new Refusal('OPERATOR_SURFACE_REQUIRED',
+        name + ' mints identity or trust and is an operator action; it is not on the runner-facing surface');
+    };
+  }
   const ledgerSurface = exposeInternals ? ledger : readOnlyLedger(ledger);
   const registrySurface = exposeInternals ? registry : readOnlyRegistry(registry);
   const memorySurface = exposeInternals ? memory : Object.freeze({ all: (agentId) => memory.all(agentId) });
@@ -680,19 +699,22 @@ export async function createControlPlane(options) {
     decide: (request) => decide(request).receipt,
 
     // artifacts and trust
-    registerArtifact,
+    registerArtifact: exposeInternals ? registerArtifact : operatorOnly('registerArtifact'),
     evaluateArtifact,
     releaseArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'release', target: input.artifactId, params: { by: input.by } }),
     promoteArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'promote', target: input.artifactId, params: { approval: input.approval, by: input.by } }),
     rollbackArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'rollback', target: input.artifactId, params: { toVersion: input.toVersion, by: input.by } }),
     revokeTrust: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'revoke', target: input.artifactId, params: { reason: input.reason, by: input.by } }),
     mutateArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'mutate_artifact', target: input.artifactId, params: { patch: input.patch, by: input.by || input.agentId } }),
-    bootstrapTrust,
+    bootstrapTrust: exposeInternals ? bootstrapTrust : operatorOnly('bootstrapTrust'),
     artifact: (artifactId) => clone(registry.current(artifactId)),
     artifactHistory: (artifactId) => registry.history(artifactId),
 
     // agents, tasks, sessions
-    createAgent: createAgentFromArtifact,
+    // MINTING IDENTITY AND TRUST IS AN OPERATOR ACTION. Leaving these on the runner-facing object
+    // let anyone holding it register a coordinator artifact, bootstrap its trust, mint a matching
+    // agent and open a session - a complete bypass of the trust root (security scan, high).
+    createAgent: exposeInternals ? createAgentFromArtifact : operatorOnly('createAgent'),
     agent: (agentId) => clone(requireAgent(agentId)),
     createTask,
     task: (taskId) => clone(requireTask(taskId)),
@@ -721,7 +743,31 @@ export async function createControlPlane(options) {
       invariants: ['I11', 'I12', 'I13', 'I14', 'I15', 'I16', 'I17'],
       effects: ['ALLOW', 'REQUIRE_VERIFICATION', 'REQUIRE_APPROVAL', 'DENY', 'BLOCK'],
       internalsExposed: exposeInternals,
+      operatorSurfaceExposed: exposeInternals,
     }),
+  };
+
+  /**
+   * Exactly what a runner would be handed: the gate, the gated work actions, reads and session
+   * lifecycle - with identity/trust minting replaced by a loud refusal. This is the object the
+   * security scan's high finding was about, so it can be tested directly instead of reasoned about.
+   */
+  api.runnerSurface = function runnerSurface() {
+    const view = {};
+    for (const key of Object.keys(api)) view[key] = api[key];
+    // The read-only views are rebuilt here rather than inherited: on a privileged control plane
+    // api.ledger is the RAW ledger, and inheriting it would hand the runner exactly the minting
+    // surface this view exists to withhold.
+    view.ledger = readOnlyLedger(ledger);
+    view.registry = readOnlyRegistry(registry);
+    view.memory = Object.freeze({ all: (agentId) => memory.all(agentId) });
+    view.governance = readOnlyGovernance(governance);
+    view.registerArtifact = operatorOnly('registerArtifact');
+    view.bootstrapTrust = operatorOnly('bootstrapTrust');
+    view.createAgent = operatorOnly('createAgent');
+    view.describe = () => ({ ...api.describe(), internalsExposed: false, operatorSurfaceExposed: false });
+    view.runnerSurface = () => Object.freeze({ ...view });
+    return Object.freeze(view);
   };
 
   return api;
