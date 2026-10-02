@@ -155,6 +155,7 @@ export class Ledger {
       grantId: input.grantId,
       sessionId: input.sessionId,
       agentId: input.agentId,
+      actorId: input.actorId === undefined ? null : input.actorId,
       action: input.action,
       target: input.target,
       resource: input.resource === undefined ? null : input.resource,
@@ -240,6 +241,12 @@ export class Ledger {
     if (!input.verifierAgentId) throw new Refusal('VERIFICATION_NEEDS_VERIFIER', 'a verification must name its verifier');
     if (input.verifierAgentId === subject.agentId) {
       throw new Refusal('SELF_VERIFICATION', 'agent ' + input.verifierAgentId + ' may not verify its own execution');
+    }
+    // THE ACTOR CHECK. "A different agent id" is cosmetic if one actor can hold two agents; "a
+    // different actor" is not. This is the root four rounds of scans kept arriving at.
+    if (input.verifierActorId && subject.actorId && input.verifierActorId === subject.actorId) {
+      throw new Refusal('SELF_VERIFICATION',
+        'actor ' + input.verifierActorId + ' produced the work it is verifying; independence needs a different actor, not a different agent id');
     }
     const evidenceIds = Array.isArray(input.evidenceIds) ? input.evidenceIds : [];
     if (evidenceIds.length === 0) {

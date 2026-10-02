@@ -6,7 +6,7 @@
 // Rules are collected rather than short-circuited, then the MOST SEVERE result wins. A rule that
 // says ALLOW can never talk the gate out of a rule that says BLOCK, regardless of table order.
 
-import { Refusal, severityOf, worstEffect } from './core.mjs';
+import { Refusal, severityOf, sha256, worstEffect } from './core.mjs';
 import { roleAllows, roleAllowsTool, roleAllowsResource, trustPermitsExecution } from './identity.mjs';
 
 export const STATE_ESTABLISHING_ACTIONS = Object.freeze([
@@ -73,6 +73,20 @@ export const RULES = [
       if (ctx.request.agentId === ctx.session.agentId) return null;
       return decision('DENY', 'AGENT_SESSION_MISMATCH',
         'request claims to be ' + ctx.request.agentId + ' but the session belongs to ' + ctx.session.agentId, 'I12');
+    },
+  },
+  {
+    id: 'P03c',
+    invariant: 'I12',
+    code: 'SESSION_TOKEN_INVALID',
+    when(ctx) {
+      if (!ctx.session) return null;
+      // Acting on a session requires its token. Without this a leaked session id was enough.
+      const presented = ctx.request && ctx.request.sessionToken;
+      if (presented && ctx.session.tokenHash === sha256(String(presented))) return null;
+      if (presented) return decision('DENY', 'SESSION_TOKEN_INVALID', 'the session token does not match this session', 'I12');
+      return decision('DENY', 'SESSION_TOKEN_MISSING',
+        'this action must present the session token it was opened with', 'I12');
     },
   },
   {
@@ -263,6 +277,25 @@ export const RULES = [
       if (subject && subject !== ctx.request.agentId) return null;
       return decision('DENY', 'SELF_VERIFICATION',
         'agent ' + ctx.request.agentId + ' may not verify its own implementation or execution', 'I15');
+    },
+  },
+  {
+    id: 'P15b',
+    invariant: 'I15',
+    code: 'SELF_VERIFICATION',
+    when(ctx) {
+      if (ctx.request.action !== 'verify') return null;
+      const params = ctx.request.params || {};
+      const subjectId = params.subjectExecutionId || ctx.request.target;
+      const subject = subjectId ? ctx.ledger.executions.get(subjectId) : null;
+      if (!subject || !ctx.session) return null;
+      // The ACTOR check, not the agent-id check: one actor can hold two agents, and then "a
+      // different agent verified it" means nothing.
+      if (subject.actorId && subject.actorId === ctx.session.actorId) {
+        return decision('DENY', 'SELF_VERIFICATION',
+          'actor ' + ctx.session.actorId + ' produced the work it is verifying; independence needs a different actor', 'I15');
+      }
+      return null;
     },
   },
   {

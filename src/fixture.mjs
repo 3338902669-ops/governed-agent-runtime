@@ -29,6 +29,41 @@ export async function makeWorld(options) {
     internals: opts.internals === undefined ? true : opts.internals === true,
   });
 
+  // THE FIXTURE IS A COOPERATIVE HOST. It mints actors and remembers the session tokens it handed
+  // out, so the ordinary tests can be written without threading credentials through every call.
+  // The primitives themselves live in src/ and are tested raw in A27.
+  const minted = {
+    impl: cp.createActor({ actorId: 'actor-impl', name: 'implementer actor' }),
+    verify: cp.createActor({ actorId: 'actor-verify', name: 'verifier actor' }),
+    coord: cp.createActor({ actorId: 'actor-coord', name: 'coordinator actor' }),
+    eval: cp.createActor({ actorId: 'actor-eval', name: 'evaluator actor' }),
+  };
+  const tokens = new Map();
+  const rawOpenSession = cp.openSession;
+  cp.openSession = async (input) => {
+    const requested = { ...input };
+    if (!requested.actorId) {
+      // default the actor from the agent, so a test that only names an agent still gets a real one
+      const key = requested.agentId === 'agent-verify' ? 'verify'
+        : requested.agentId === 'agent-coord' ? 'coord'
+          : requested.agentId === 'agent-eval' ? 'eval' : 'impl';
+      requested.actorId = minted[key].actorId;
+      requested.actorSecret = minted[key].secret;
+    }
+    const session = await rawOpenSession(requested);
+    tokens.set(session.sessionId, session.token);
+    return session;
+  };
+  for (const name of ['produceEvidence', 'verify', 'markDone', 'approve', 'releaseArtifact', 'promoteArtifact', 'rollbackArtifact', 'revokeTrust', 'mutateArtifact', 'evaluateArtifact', 'handoff']) {
+    const raw = cp[name];
+    cp[name] = (input) => raw({
+      ...input,
+      sessionToken: (input && input.sessionToken)
+        || tokens.get(input && input.sessionId)
+        || tokens.get(input && input.fromSessionId),
+    });
+  }
+
   const artifacts = {};
   const roles = { impl: 'implementer', verify: 'verifier', eval: 'evaluator', coord: 'coordinator' };
   for (const key of Object.keys(roles)) {
@@ -50,7 +85,7 @@ export async function makeWorld(options) {
     coord: cp.createAgent({ agentId: 'agent-coord', artifactId: artifacts.coord.artifactId, roleId: 'coordinator' }),
   };
 
-  return { cp, artifacts, agents, clock, calls, spyExecutor };
+  return { cp, artifacts, agents, actors: minted, clock, calls, spyExecutor, rawOpenSession, tokens };
 }
 
 /** Open the three sessions a normal task needs and create the task. */
@@ -68,6 +103,7 @@ export function request(session, action, extra) {
   return {
     sessionId: session.sessionId,
     agentId: session.agentId,
+    sessionToken: session.token,
     taskId: session.taskId,
     action,
     ...(extra || {}),

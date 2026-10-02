@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { makeWorld, openWork, request, runHappyPath } from './harness.mjs';
 import { authorize } from '../src/policy.mjs';
 import { createControlPlane } from '../src/control-plane.mjs';
+import { sha256 } from '../src/core.mjs';
 import { Refusal } from '../src/core.mjs';
 
 const REFUSALS = ['DENY', 'BLOCK', 'REQUIRE_VERIFICATION', 'REQUIRE_APPROVAL'];
@@ -153,8 +154,8 @@ test('A06b: the approval-binding rule fires when an approval is moved to another
   const world = await makeWorld();
   const work = await openWork(world);
   const receipt = authorize({
-    request: { sessionId: 'session-b', agentId: 'agent-impl', taskId: work.task.taskId, action: 'execute', target: 'production', externalAction: { kind: 'deploy', target: 'production' } },
-    session: { sessionId: 'session-b', agentId: 'agent-impl', artifactId: world.artifacts.impl.artifactId, definitionHash: 'h', identityHash: 'i', taskId: work.task.taskId, approval: { approved: true, approvedBy: 'human-root', scope: 'production', sessionId: 'session-a', agentId: 'agent-impl' } },
+    request: { sessionId: 'session-b', agentId: 'agent-impl', sessionToken: 'token-b', taskId: work.task.taskId, action: 'execute', target: 'production', externalAction: { kind: 'deploy', target: 'production' } },
+    session: { sessionId: 'session-b', agentId: 'agent-impl', actorId: 'actor-impl', tokenHash: sha256('token-b'), artifactId: world.artifacts.impl.artifactId, definitionHash: 'h', identityHash: 'i', taskId: work.task.taskId, approval: { approved: true, approvedBy: 'human-root', scope: 'production', sessionId: 'session-a', agentId: 'agent-impl' } },
     identity: { agentId: 'agent-impl', identityFingerprint: 'i' },
     role: { roleId: 'implementer', lifecycle: 'ACTIVE', permissions: { allow: ['execute'], deny: [] }, allowedTools: ['shell'], allowedResources: ['*'] },
     registry: { current: () => ({ definitionHash: 'h', trust: 'VALIDATED', evaluations: [] }), assertIntegrity: () => true },
@@ -327,7 +328,7 @@ test('A16: the surface a runner gets cannot mint a grant, an execution or a fact
 
   // What a runner holds: a client pinned to one session.
   const session = await world.cp.openSession({ agentId: 'agent-impl', own: false });
-  const client = runner.clientFor(session.sessionId);
+  const client = runner.clientFor(session.sessionId, session.token);
   assert.equal(client.session().agentId, 'agent-impl');
   assert.equal(client.handoff, undefined, 'handoff names a successor: an operator action');
   await assert.rejects(() => client.execute('grant-forged', {}), (e) => /GRANT_UNKNOWN/.test(e.message));
@@ -524,7 +525,7 @@ test('A24: a runner cannot open a session for another agent', async () => {
 
   // What a runner holds instead: a client pinned to one session.
   const session = await world.cp.openSession({ agentId: 'agent-impl', own: false });
-  const client = world.cp.clientFor(session.sessionId);
+  const client = world.cp.clientFor(session.sessionId, session.token);
   assert.equal(client.sessionId, session.sessionId);
   assert.equal(client.session().agentId, 'agent-impl');
   assert.equal(typeof client.act, 'function');
@@ -540,7 +541,7 @@ test('A25: a runner cannot redeem a grant issued to another session', async () =
   assert.equal(pending.granted, true);
 
   const other = await world.cp.openSession({ agentId: 'agent-impl', own: false });
-  const client = world.cp.clientFor(other.sessionId);
+  const client = world.cp.clientFor(other.sessionId, other.token);
   await assert.rejects(() => client.execute(pending.grantId, { args: {} }), (e) => e.code === 'GRANT_WRONG_SESSION');
   assert.equal(world.calls.length, 0, 'possession of a grant id is not authorisation');
 
@@ -572,6 +573,54 @@ test('A26: revocation survives mutate and rollback (the third door)', async () =
   // Revocation is a property of the ARTIFACT, so no version of it can come back.
   assert.equal(world.cp.registry.isRevoked(artifactId), true);
   assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
+});
+
+test('A27: a session id proves nothing without the actor credential and the session token', async () => {
+  const world = await makeWorld();
+  // no actor at all
+  await assert.rejects(() => world.rawOpenSession({ agentId: 'agent-verify', own: false }), (e) => e.code === 'ACTOR_UNKNOWN' || e.code === 'ACTOR_CREDENTIAL_INVALID');
+  // a wrong secret
+  await assert.rejects(() => world.rawOpenSession({ actorId: 'actor-impl', actorSecret: 'wrong', agentId: 'agent-impl', own: false }), (e) => e.code === 'ACTOR_CREDENTIAL_INVALID');
+
+  const session = await world.rawOpenSession({ actorId: 'actor-impl', actorSecret: world.actors.impl.secret, agentId: 'agent-impl', own: false });
+  const noToken = await world.cp.submit({ sessionId: session.sessionId, agentId: 'agent-impl', action: 'read', target: 'anything' });
+  assert.equal(noToken.receipt.effect, 'DENY');
+  assert.equal(noToken.receipt.code, 'SESSION_TOKEN_MISSING');
+  const wrongToken = await world.cp.submit({ sessionId: session.sessionId, agentId: 'agent-impl', sessionToken: 'not-the-token', action: 'read', target: 'anything' });
+  assert.equal(wrongToken.receipt.code, 'SESSION_TOKEN_INVALID');
+  const ok = await world.cp.submit({ sessionId: session.sessionId, agentId: 'agent-impl', sessionToken: session.token, action: 'read', target: 'anything' });
+  assert.equal(ok.receipt.effect, 'ALLOW');
+});
+
+test('A28: one actor cannot verify its own work, even with two agents', async () => {
+  const world = await makeWorld();
+  const work = await openWork(world);
+  const write = await world.cp.act(request(work.sImpl, 'write', { target: 'file:src/a.mjs', resource: 'file:src/a.mjs', tool: 'edit', params: {} }));
+  const ev = await world.cp.produceEvidence({ sessionId: work.sImpl.sessionId, agentId: 'agent-impl', taskId: work.task.taskId, executionId: write.executionId, params: { grade: 'E3', note: 'done by hand' } });
+
+  // The SAME actor opens a verifier session. Different agent id, same principal.
+  const sameActor = await world.rawOpenSession({ actorId: 'actor-impl', actorSecret: world.actors.impl.secret, agentId: 'agent-verify', taskId: work.task.taskId, own: false });
+  const attempt = await world.cp.act({
+    sessionId: sameActor.sessionId, agentId: 'agent-verify', sessionToken: sameActor.token, taskId: work.task.taskId,
+    action: 'verify', target: write.executionId,
+    params: { subjectExecutionId: write.executionId, subjectAgentId: 'agent-impl', verdict: 'PASS', criteria: ['x'], evidenceIds: [ev.result.evidenceId] },
+  });
+  assert.equal(attempt.receipt.effect, 'DENY');
+  assert.equal(attempt.receipt.code, 'SELF_VERIFICATION', 'independence must be measured between actors, not agent ids');
+  assert.equal(world.cp.ledger.verifications.size, 0);
+
+  // A different actor can verify it.
+  const different = await world.cp.verify({ sessionId: work.sVerify.sessionId, agentId: 'agent-verify', taskId: work.task.taskId, subjectExecutionId: write.executionId, subjectAgentId: 'agent-impl', verdict: 'PASS', criteria: ['x'], evidenceIds: [ev.result.evidenceId] });
+  assert.equal(different.receipt.effect, 'ALLOW');
+});
+
+test('A29: a revoked actor cannot open new sessions', async () => {
+  const world = await makeWorld();
+  world.cp.revokeActor({ actorId: 'actor-verify', reason: 'offboarded' });
+  await assert.rejects(
+    () => world.rawOpenSession({ actorId: 'actor-verify', actorSecret: world.actors.verify.secret, agentId: 'agent-verify', own: false }),
+    (e) => e.code === 'ACTOR_REVOKED',
+  );
 });
 
 test('A15b: the audit detects a runtime that diverged from governance', async () => {

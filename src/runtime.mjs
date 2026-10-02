@@ -156,6 +156,7 @@ export function createGovernedRuntime(options) {
         target: head.target,
         resource: head.resource,
         taskId: gate.taskId === undefined ? null : gate.taskId,
+        actorId: gate.actorId === undefined ? null : gate.actorId,
         startedAt,
         outcome: failure ? 'error' : 'ok',
         produced: failure ? String(failure && failure.message ? failure.message : failure) : result,

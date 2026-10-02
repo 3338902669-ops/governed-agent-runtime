@@ -9,11 +9,12 @@
 // revoke, approval, handoff) are themselves actions that go through both doors. There is no
 // administrative back door that writes state directly.
 
-import { Refusal, clone, hashOf, isAllowed, newId, systemClock } from './core.mjs';
+import { Refusal, clone, hashOf, isAllowed, newId, sha256, systemClock } from './core.mjs';
 import {
   ArtifactRegistry, DEFAULT_ROLES, createAgent, freezeIdentity, trustPermitsExecution,
 } from './identity.mjs';
 import { Ledger } from './ledger.mjs';
+import { ActorRegistry } from './actors.mjs';
 import { AgentMemory } from './memory.mjs';
 import { authorize } from './policy.mjs';
 import { createGovernedRuntime } from './runtime.mjs';
@@ -35,6 +36,7 @@ export async function createControlPlane(options) {
   const loaded = opts.governance || (await tryLoadGovernance(opts.governanceLibPath));
   const governance = new GovernanceBridge(loaded, opts.roster || DEFAULT_RUNTIME_ROSTER);
   const registry = new ArtifactRegistry();
+  const actors = new ActorRegistry();
   const ledger = new Ledger(clock);
   const memory = new AgentMemory();
 
@@ -133,7 +135,7 @@ export async function createControlPlane(options) {
     if (!chain.ok) return { ok: false, code: 'LEDGER_TAMPERED', effect: 'BLOCK', reason: 'ledger chain broken at row ' + chain.brokenAt };
     // The task binding is re-derived from the SESSION at execution time and travels with the
     // execution, so a verification cannot later be pointed at unrelated work.
-    return { ok: true, taskId: session.taskId === undefined ? null : session.taskId };
+    return { ok: true, taskId: session.taskId === undefined ? null : session.taskId, actorId: session.actorId };
   }
 
   // -------------------------------------------------------- state actions
@@ -184,6 +186,7 @@ export async function createControlPlane(options) {
         }
         const record = ledger.recordVerification({
           verifierAgentId: agentId,
+          verifierActorId: verifierSession ? verifierSession.actorId : null,
           subjectExecutionId: args.subjectExecutionId || target,
           verdict: args.verdict,
           criteria: args.criteria,
@@ -297,7 +300,7 @@ export async function createControlPlane(options) {
       }
       case 'handoff': {
         const from = requireSession(args.sessionId);
-        const opened = await openSession({ agentId: args.toAgentId, taskId: from.taskId, own: true, reason: 'handoff' });
+        const opened = await establishSession({ actorId: from.actorId, agentId: args.toAgentId, taskId: from.taskId, own: true, reason: 'handoff' });
         const previous = from.sessionId;
         from.supersededBy = opened.sessionId;
         from.closedAt = clock();
@@ -376,6 +379,7 @@ export async function createControlPlane(options) {
     const session = requireSession(input.sessionId);
     const result = await act({
       sessionId: input.sessionId,
+      sessionToken: input.sessionToken,
       agentId: session.agentId,
       taskId: session.taskId,
       action: 'evaluate',
@@ -467,7 +471,37 @@ export async function createControlPlane(options) {
     return clone(record);
   }
 
+  function createActor(input) {
+    const minted = actors.create({ ...(input || {}), at: clock() });
+    ledger.append('actor.created', { actorId: minted.actorId, name: minted.name, kind: minted.kind });
+    return minted;
+  }
+
+  function revokeActor(input) {
+    const record = actors.revoke(input.actorId, input.reason, clock());
+    ledger.append('actor.revoked', { actorId: record.actorId, reason: input.reason });
+    return record;
+  }
+
   async function openSession(input) {
+    // NO SESSION WITHOUT AN AUTHENTICATED ACTOR. This is the primitive four rounds of scans kept
+    // pointing at: previously a session was a bearer token and the runtime trusted whoever held it.
+    const actor = actors.authenticate(input.actorId, input.actorSecret);
+    return establishSession({
+      actorId: actor.actorId,
+      agentId: input.agentId,
+      taskId: input.taskId,
+      own: input.own,
+      reason: input.reason,
+    });
+  }
+
+  /**
+   * The body of openSession, already past authentication. Only two callers: openSession itself, and
+   * the gated handoff executor, which acts under the handing actor - it cannot present a secret it
+   * does not hold, and it must not be able to pick a different actor.
+   */
+  async function establishSession(input) {
     const identity = requireAgent(input.agentId);
     const artifactId = identity.artifactId;
     registry.assertIntegrity(artifactId);
@@ -485,8 +519,13 @@ export async function createControlPlane(options) {
       if (input.own !== false) governance.claim(input.taskId, input.agentId);
     }
     const sessionId = newId('session');
+    const token = newId('token') + newId('token');
     const session = {
       sessionId,
+      // A session is no longer a bearer token: acting on it requires the token, of which only the
+      // hash is kept here. Holding the id proves nothing.
+      tokenHash: sha256(token),
+      actorId: input.actorId,
       agentId: input.agentId,
       artifactId,
       artifactVersion: current.version,
@@ -503,10 +542,12 @@ export async function createControlPlane(options) {
     };
     sessions.set(sessionId, session);
     ledger.append('session.opened', {
-      sessionId, agentId: session.agentId, taskId: session.taskId, ownsTask: session.ownsTask,
-      definitionHash: session.definitionHash, identityHash: session.identityHash, reason: session.reason,
+      sessionId, agentId: session.agentId, actorId: session.actorId, taskId: session.taskId,
+      ownsTask: session.ownsTask, definitionHash: session.definitionHash,
+      identityHash: session.identityHash, reason: session.reason,
     });
-    return clone(session);
+    // The token is returned exactly once, to the actor that opened the session.
+    return { ...clone(session), token };
   }
 
   async function closeSession(sessionId, reason) {
@@ -519,10 +560,13 @@ export async function createControlPlane(options) {
 
   async function handoff(input) {
     const from = requireSession(input.fromSessionId);
-    return act(sessionRequest(input.fromSessionId, from.agentId, 'handoff', {
-      target: from.taskId,
-      params: { sessionId: input.fromSessionId, toAgentId: input.toAgentId, reason: input.reason },
-    }));
+    return act({
+      ...sessionRequest(input.fromSessionId, from.agentId, 'handoff', {
+        target: from.taskId,
+        params: { sessionId: input.fromSessionId, toAgentId: input.toAgentId, reason: input.reason },
+      }),
+      sessionToken: input.sessionToken,
+    });
   }
 
   /** Approve an external action for a session. The approver must be a different agent. */
@@ -543,6 +587,7 @@ export async function createControlPlane(options) {
     // session-independence check above is a fact about sessions rather than a claim in a name.
     const submitted = await runtime.submit({
       sessionId: approverSession.sessionId,
+      sessionToken: input.sessionToken,
       agentId: approverSession.agentId,
       taskId: targetSession.taskId,
       action: 'approve',
@@ -721,12 +766,14 @@ export async function createControlPlane(options) {
     // artifacts and trust
     registerArtifact: exposeInternals ? registerArtifact : operatorOnly('registerArtifact'),
     evaluateArtifact,
-    releaseArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'release', target: input.artifactId, params: { by: input.by } }),
-    promoteArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'promote', target: input.artifactId, params: { approval: input.approval, by: input.by } }),
-    rollbackArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'rollback', target: input.artifactId, params: { toVersion: input.toVersion, by: input.by } }),
-    revokeTrust: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'revoke', target: input.artifactId, params: { reason: input.reason, by: input.by } }),
-    mutateArtifact: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'mutate_artifact', target: input.artifactId, params: { patch: input.patch, by: input.by || input.agentId } }),
+    releaseArtifact: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'release', target: input.artifactId, params: { by: input.by } }),
+    promoteArtifact: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'promote', target: input.artifactId, params: { approval: input.approval, by: input.by } }),
+    rollbackArtifact: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'rollback', target: input.artifactId, params: { toVersion: input.toVersion, by: input.by } }),
+    revokeTrust: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'revoke', target: input.artifactId, params: { reason: input.reason, by: input.by } }),
+    mutateArtifact: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'mutate_artifact', target: input.artifactId, params: { patch: input.patch, by: input.by || input.agentId } }),
     bootstrapTrust: exposeInternals ? bootstrapTrust : operatorOnly('bootstrapTrust'),
+    createActor: exposeInternals ? createActor : operatorOnly('createActor'),
+    revokeActor: exposeInternals ? revokeActor : operatorOnly('revokeActor'),
     artifact: (artifactId) => clone(registry.current(artifactId)),
     artifactHistory: (artifactId) => registry.history(artifactId),
 
@@ -744,9 +791,9 @@ export async function createControlPlane(options) {
     session: (sessionId) => clone(requireSession(sessionId)),
 
     // work
-    produceEvidence: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'produce_evidence', target: input.executionId, params: { ...input.params, executionId: input.executionId, agentId: input.agentId } }),
-    verify: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId || null, action: 'verify', target: input.subjectExecutionId, params: { subjectExecutionId: input.subjectExecutionId, subjectAgentId: input.subjectAgentId, verdict: input.verdict, criteria: input.criteria, evidenceIds: input.evidenceIds, findings: input.findings, taskId: input.taskId } }),
-    markDone: (input) => act({ sessionId: input.sessionId, agentId: input.agentId, taskId: input.taskId, action: 'mark_done', target: input.taskId, params: { taskId: input.taskId, agentId: input.agentId, verificationId: input.verificationId } }),
+    produceEvidence: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'produce_evidence', target: input.executionId, params: { ...input.params, executionId: input.executionId, agentId: input.agentId } }),
+    verify: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId || null, action: 'verify', target: input.subjectExecutionId, params: { subjectExecutionId: input.subjectExecutionId, subjectAgentId: input.subjectAgentId, verdict: input.verdict, criteria: input.criteria, evidenceIds: input.evidenceIds, findings: input.findings, taskId: input.taskId } }),
+    markDone: (input) => act({ sessionId: input.sessionId, sessionToken: input.sessionToken, agentId: input.agentId, taskId: input.taskId, action: 'mark_done', target: input.taskId, params: { taskId: input.taskId, agentId: input.agentId, verificationId: input.verificationId } }),
     approve,
 
     // reads
@@ -776,17 +823,21 @@ export async function createControlPlane(options) {
    * A session-scoped client: the gate and the work actions, with the session and the acting agent
    * fixed by construction. This is what a runner should hold instead of the control plane itself.
    */
-  api.clientFor = function clientFor(sessionId) {
+  api.clientFor = function clientFor(sessionId, token) {
     const current = () => {
       const s = sessions.get(sessionId);
       if (!s) throw new Refusal('SESSION_UNKNOWN', 'no session ' + String(sessionId));
+      if (sha256(String(token)) !== s.tokenHash) {
+        throw new Refusal('SESSION_TOKEN_INVALID', 'clientFor needs the token the session was opened with');
+      }
       return s;
     };
-    const bound = (fn) => (input) => fn({ ...(input || {}), sessionId, agentId: current().agentId });
+    const withToken = (request) => ({ ...request, sessionId, agentId: current().agentId, sessionToken: token });
+    const bound = (fn) => (input) => fn(withToken(input || {}));
     return Object.freeze({
       sessionId,
       session: () => clone(current()),
-      submit: (request) => submit({ ...request, sessionId, agentId: current().agentId }),
+      submit: (request) => submit(withToken(request)),
       // Redeeming a grant is bound to the session it was issued to. Possession of an id is not
       // authorisation.
       execute: async (grantId, attempt) => {
@@ -797,7 +848,7 @@ export async function createControlPlane(options) {
         }
         return execute(grantId, attempt);
       },
-      act: (request) => act({ ...request, sessionId, agentId: current().agentId }),
+      act: (request) => act(withToken(request)),
       produceEvidence: bound(api.produceEvidence),
       verify: bound(api.verify),
       markDone: bound(api.markDone),
@@ -831,6 +882,8 @@ export async function createControlPlane(options) {
     view.registerArtifact = operatorOnly('registerArtifact');
     view.bootstrapTrust = operatorOnly('bootstrapTrust');
     view.createAgent = operatorOnly('createAgent');
+    view.createActor = operatorOnly('createActor');
+    view.revokeActor = operatorOnly('revokeActor');
     view.openSession = operatorOnly('openSession');
     view.closeSession = operatorOnly('closeSession');
     view.handoff = operatorOnly('handoff');

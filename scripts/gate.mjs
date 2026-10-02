@@ -45,6 +45,20 @@ const MUTATIONS = [
     caughtBy: 'an expired approval still authorises an external action',
   },
   {
+    id: 'actor-independence-skipped',
+    file: 'src/policy.mjs',
+    find: '      if (subject.actorId && subject.actorId === ctx.session.actorId) {',
+    replace: '      if (false) {',
+    caughtBy: 'one actor can verify its own work with a second agent id',
+  },
+  {
+    id: 'session-token-not-required',
+    file: 'src/policy.mjs',
+    find: '      if (!ctx.session) return null;\n      // Acting on a session requires its token. Without this a leaked session id was enough.',
+    replace: '      return null;\n      // (mutation: token rule disabled)',
+    caughtBy: 'a leaked session id is enough to act',
+  },
+  {
     id: 'grant-redeemable-by-anyone',
     file: 'src/control-plane.mjs',
     find: '        if (grant.sessionId !== sessionId) {',
