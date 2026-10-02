@@ -38,9 +38,11 @@ designed behaviour, not a packaging bug.
 
 ```bash
 node bin/demo.mjs          # the governed path, twelve attacks, and the audit
-node --test "test/*.test.mjs"   # 38 checks: 16 invariant tests, 22 attack tests
+node --test test/invariants.test.mjs test/adversarial.test.mjs   # 49 checks: 16 invariants, 33 attacks
+# or: npm test  (the file names are listed explicitly because globs need Node 21+, and this
+# package supports Node 18+)
 node bench/benchmark.mjs   # naive vs governed vs governed+runtime (positive control first)
-node scripts/gate.mjs      # the suite, the benchmark, and eight injected faults that must be caught
+node scripts/gate.mjs      # the suite, the benchmark, and sixteen injected faults that must be caught
 ```
 
 ## Measured, not asserted
@@ -128,7 +130,7 @@ There is no `WARNING` and no `LOG`. A gate that can only warn is a record, not a
 
 The implementer is not the verifier. Two independent rounds (天枢 / headless `rivet` worker) were run
 against this repository, and both **failed to complete** - but their static reading found four
-defects that the 34-test suite, the benchmark and the gate had all passed over. The full log is in
+defects that the 49-test suite, the benchmark and the gate had all passed over. The full log is in
 [VERIFICATION.md](VERIFICATION.md). The two that mattered:
 
 - **C1 - the gate could be walked around.** `createControlPlane` attached the raw ledger to its
@@ -200,7 +202,7 @@ src/runtime.mjs        the sealed executor and the grant protocol
 src/control-plane.mjs  wiring: every state change is a gated action
 src/fixture.mjs        the world the tests and the benchmark build
 test/invariants.test.mjs   I11-I18
-test/adversarial.test.mjs  the fifteen attacks
+test/adversarial.test.mjs  the thirty-three attacks
 bench/                 incidents, the three-model benchmark, evidence
 bin/demo.mjs           the run-through
 scripts/gate.mjs       the suite, the benchmark, and the injected faults

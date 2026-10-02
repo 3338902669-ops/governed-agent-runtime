@@ -9,10 +9,14 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveGovernanceLib } from '../src/governance.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
-const GOVERNANCE_LIB = new URL('../../agent-orchestra-repo/scripts/orchestrator/lib.mjs', import.meta.url).href;
+// Shared resolver: honours GAR_GOVERNANCE_LIB, then the names a clone can produce. The gate used
+// to hardcode the author's directory name and then OVERRIDE the environment variable for every
+// child process, so relocating the governance engine was impossible.
+const GOVERNANCE_LIB = resolveGovernanceLib();
 const TEST_FILES = ['test/invariants.test.mjs', 'test/adversarial.test.mjs'];
 
 const MUTATIONS = [
@@ -134,6 +138,8 @@ const MUTATIONS = [
 function run(command, args, cwd, env) {
   const result = spawnSync(command, args, {
     cwd,
+    // The resolver already honoured GAR_GOVERNANCE_LIB; passing it through keeps the children on
+    // the same engine the gate just checked, and an explicit env argument still wins.
     env: { ...process.env, GAR_GOVERNANCE_LIB: GOVERNANCE_LIB, ...(env || {}) },
     encoding: 'utf8',
   });
@@ -154,6 +160,22 @@ if (clean.status !== 0) {
   failed = true;
   console.error(clean.stdout);
   console.error(clean.stderr);
+}
+
+// 1b. the prose must agree with the code. This repository published four different test counts in
+// four files because nothing checked them; a reviewer found it, not a machine.
+const claims = nodeRun(['scripts/check-claims.mjs'], REPO);
+rows.push({
+  id: 'claims',
+  verdict: claims.status === 0 ? 'PASS' : 'FAIL',
+  detail: claims.status === 0
+    ? (claims.stdout.trim().split('\n').pop() || 'every document agrees with the code')
+    : 'a document states a number the code does not have',
+});
+if (claims.status !== 0) {
+  failed = true;
+  console.error(claims.stdout);
+  console.error(claims.stderr);
 }
 
 // 2. the benchmark must prevent every incident

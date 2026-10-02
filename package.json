@@ -6,7 +6,7 @@
   "description": "A governed agent runtime: no action executes without a governance decision.",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\"",
+    "test": "node --test test/invariants.test.mjs test/adversarial.test.mjs",
     "bench": "node bench/benchmark.mjs",
     "demo": "node bin/demo.mjs",
     "gate": "node scripts/gate.mjs"

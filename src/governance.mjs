@@ -12,10 +12,42 @@
 //   * THE DECISION IS THE ENGINE'S. probeClaim runs the engine's own claimTask over a scratch copy
 //     of its state, so a resource conflict is refused by the code that owns that rule.
 
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Refusal, clone } from './core.mjs';
 
-const DEFAULT_LIB = process.env.GAR_GOVERNANCE_LIB
-  || new URL('../../agent-orchestra-repo/scripts/orchestrator/lib.mjs', import.meta.url).href;
+/**
+ * Where the governance engine lives.
+ *
+ * This used to hardcode `../../agent-orchestra-repo`, which is the name of the directory on the
+ * author's machine - but a plain `git clone` of the published sibling produces `agent-orchestra`.
+ * A new user following the README therefore failed thirteen of sixteen tests on the first command.
+ *
+ * Order: the explicit override, then the names a clone can actually produce.
+ */
+const CANDIDATES = [
+  '../../agent-orchestra/scripts/orchestrator/lib.mjs',
+  '../../agent-orchestra-repo/scripts/orchestrator/lib.mjs',
+  '../../../agent-orchestra/scripts/orchestrator/lib.mjs',
+];
+
+export function resolveGovernanceLib() {
+  if (process.env.GAR_GOVERNANCE_LIB) return process.env.GAR_GOVERNANCE_LIB;
+  for (const relative of CANDIDATES) {
+    const url = new URL(relative, import.meta.url);
+    try {
+      if (existsSync(fileURLToPath(url))) return url.href;
+    } catch (error) { /* an unreadable candidate is simply not a candidate */ }
+  }
+  // Nothing found: report the most likely path so the error names something the reader can fix.
+  return new URL(CANDIDATES[0], import.meta.url).href;
+}
+
+export function governanceLibCandidates() {
+  return CANDIDATES.map((relative) => new URL(relative, import.meta.url).href);
+}
+
+const DEFAULT_LIB = resolveGovernanceLib();
 
 export async function tryLoadGovernance(libPath) {
   const path = libPath || DEFAULT_LIB;
