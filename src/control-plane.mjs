@@ -665,7 +665,13 @@ export async function createControlPlane(options) {
       evidence: () => clone([...l.evidence.values()]),
       verifications: () => clone([...l.verifications.values()]),
       executions: () => clone([...l.executions.values()]),
-      grants: () => clone([...l.grants.values()]),
+      // NOT the grant ids: the read-only view used to publish every unconsumed grant, and
+      // runtime.execute authorised by possession alone, so a runner could redeem another session's
+      // pending grant with its own arguments.
+      grantSummary: () => ({
+        issued: l.grants.size,
+        consumed: [...l.grants.values()].filter(function (g) { return g.consumedAt !== null; }).length,
+      }),
     });
   }
   function readOnlyRegistry(r) {
@@ -781,12 +787,22 @@ export async function createControlPlane(options) {
       sessionId,
       session: () => clone(current()),
       submit: (request) => submit({ ...request, sessionId, agentId: current().agentId }),
-      execute,
+      // Redeeming a grant is bound to the session it was issued to. Possession of an id is not
+      // authorisation.
+      execute: async (grantId, attempt) => {
+        const grant = ledger.grants.get(grantId);
+        if (!grant) throw new Refusal('GRANT_UNKNOWN', 'no such grant: ' + String(grantId));
+        if (grant.sessionId !== sessionId) {
+          throw new Refusal('GRANT_WRONG_SESSION', 'grant ' + String(grantId) + ' was issued to another session');
+        }
+        return execute(grantId, attempt);
+      },
       act: (request) => act({ ...request, sessionId, agentId: current().agentId }),
       produceEvidence: bound(api.produceEvidence),
       verify: bound(api.verify),
       markDone: bound(api.markDone),
-      handoff: (input) => handoff({ ...(input || {}), fromSessionId: sessionId }),
+      // No handoff: naming a successor agent is exactly the primitive that let one actor hold two
+      // identities. Handing work over is a host action until successors can be authenticated.
       close: (reason) => closeSession(sessionId, reason),
       remember: (input) => remember({ ...input, agentId: current().agentId }),
       recall: (key) => recall(current().agentId, key),
@@ -797,25 +813,29 @@ export async function createControlPlane(options) {
   };
 
   api.runnerSurface = function runnerSurface() {
-    const view = {};
-    for (const key of Object.keys(api)) view[key] = api[key];
-    // The read-only views are rebuilt here rather than inherited: on a privileged control plane
-    // api.ledger is the RAW ledger, and inheriting it would hand the runner exactly the minting
-    // surface this view exists to withhold.
-    view.ledger = readOnlyLedger(ledger);
-    view.registry = readOnlyRegistry(registry);
-    view.memory = Object.freeze({ all: (agentId) => memory.all(agentId) });
-    view.governance = readOnlyGovernance(governance);
+    // FOUR ROUNDS OF SCANS, ONE LESSON: patching the reported path leaves its siblings open.
+    // openSession was closed, then handoff (which calls openSession internally) was found; revoke
+    // was made terminal on one path, then mutate->rollback, then the superseded version. The
+    // primitive is "the runtime accepts an agent id from a caller and acts as that agent", so the
+    // runner surface no longer takes one: no sessions, no handoff, no raw runtime or ledger, no
+    // minting. What a runner holds is clientFor(sessionId).
+    const view = {
+      clientFor: api.clientFor,
+      systemFact,
+      taskState,
+      audit,
+      artifact: (id) => clone(registry.current(id)),
+      artifactHistory: (id) => registry.history(id),
+      runnerSurface: null,
+    };
     view.registerArtifact = operatorOnly('registerArtifact');
     view.bootstrapTrust = operatorOnly('bootstrapTrust');
     view.createAgent = operatorOnly('createAgent');
-    // Opening a session for an already-minted agent let ONE actor hold a verifier session and a
-    // coordinator session at once, which made every "a different agent did it" check cosmetic
-    // (security scan, high). Sessions are opened by the host; a runner gets a scoped client.
     view.openSession = operatorOnly('openSession');
     view.closeSession = operatorOnly('closeSession');
+    view.handoff = operatorOnly('handoff');
     view.describe = () => ({ ...api.describe(), internalsExposed: false, operatorSurfaceExposed: false });
-    view.runnerSurface = () => Object.freeze({ ...view });
+    view.runnerSurface = () => view;
     return Object.freeze(view);
   };
 

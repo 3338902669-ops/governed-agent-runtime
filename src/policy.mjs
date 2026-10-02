@@ -365,7 +365,12 @@ export const RULES = [
       if (approval && approval.approved) {
         // An approval names a target AND an operation. Without the kind it authorised any action
         // against that target (security scan, low).
-        if (approval.kind && approval.kind !== ctx.request.externalAction.kind) {
+        if (!approval.kind) {
+          return decision('REQUIRE_APPROVAL', 'APPROVAL_NEEDS_KIND',
+            'the approval names no operation, so it cannot authorise "' + ctx.request.externalAction.kind + '"', 'I12',
+            [{ kind: 'approval', scope: ctx.request.externalAction.target, action: ctx.request.externalAction.kind }]);
+        }
+        if (approval.kind !== ctx.request.externalAction.kind) {
           return decision('REQUIRE_APPROVAL', 'APPROVAL_WRONG_KIND',
             'the approval authorises "' + approval.kind + '", not "' + ctx.request.externalAction.kind + '"', 'I12',
             [{ kind: 'approval', scope: ctx.request.externalAction.target, action: ctx.request.externalAction.kind }]);

@@ -312,23 +312,25 @@ test('A16: the surface a runner gets cannot mint a grant, an execution or a fact
   const runner = world.cp.runnerSurface();
   assert.equal(runner.describe().internalsExposed, false);
 
-  assert.equal(runner.ledger.issueGrant, undefined, 'the runner ledger must not mint grants');
-  assert.equal(runner.ledger.recordExecution, undefined);
-  assert.equal(runner.ledger.recordEvidence, undefined);
-  assert.equal(runner.ledger.assertFact, undefined);
-  assert.equal(runner.ledger.consumeGrant, undefined);
-  assert.equal(runner.registry.mutate, undefined);
-  assert.equal(runner.registry.evaluate, undefined);
-  assert.equal(runner.registry.promote, undefined);
-  assert.equal(runner.governance.blockTask, undefined);
-  assert.equal(runner.governance.sever, undefined);
-  assert.equal(runner.memory.write, undefined);
+  // No raw state on the runner surface at all - not even in read-only form, because the ledger
+  // view used to publish redeemable grant ids.
+  assert.equal(runner.ledger, undefined, 'no raw ledger on the runner surface');
+  assert.equal(runner.registry, undefined);
+  assert.equal(runner.governance, undefined);
+  assert.equal(runner.memory, undefined);
+  assert.equal(runner.runtime, undefined, 'no unmetered path to the executor');
 
-  // Reading is still possible; minting is not.
-  assert.equal(typeof runner.ledger.verifyChain, 'function');
-  assert.equal(typeof runner.registry.current, 'function');
+  // Naming another agent is refused loudly rather than silently unavailable.
+  assert.throws(() => runner.registerArtifact({ name: 'x', roleId: 'coordinator', createdBy: 'a' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+  assert.throws(() => runner.openSession({ agentId: 'agent-verify' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
+  assert.throws(() => runner.handoff({ fromSessionId: 'x', toAgentId: 'agent-verify' }), (e) => e.code === 'OPERATOR_SURFACE_REQUIRED');
 
-  await assert.rejects(() => runner.runtime.execute('grant-forged', {}), (e) => /GRANT_UNKNOWN/.test(e.message));
+  // What a runner holds: a client pinned to one session.
+  const session = await world.cp.openSession({ agentId: 'agent-impl', own: false });
+  const client = runner.clientFor(session.sessionId);
+  assert.equal(client.session().agentId, 'agent-impl');
+  assert.equal(client.handoff, undefined, 'handoff names a successor: an operator action');
+  await assert.rejects(() => client.execute('grant-forged', {}), (e) => /GRANT_UNKNOWN/.test(e.message));
   assert.equal(world.calls.length, 0);
 });
 
@@ -420,14 +422,14 @@ test('A18: revoked trust cannot be reinstated by evaluating the artifact', async
   assert.equal(refused(revived, 'evaluating a revoked artifact').code, 'EVALUATION_OF_REVOKED_ARTIFACT');
   assert.throws(
     () => world.cp.registry.evaluate({ artifactId, by: 'agent-eval', checks: [{ name: 'x', passed: true }] }),
-    (e) => e.code === 'EVALUATION_OF_REVOKED_ARTIFACT',
+    (e) => e.code === 'ARTIFACT_REVOKED',
   );
 
   // A4-A6: trust stays revoked, so release and promotion stay shut
   assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
   await assert.rejects(
     () => world.cp.releaseArtifact({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId }),
-    (e) => e.code === 'RELEASE_NEEDS_EVALUATION',
+    (e) => e.code === 'RELEASE_NEEDS_EVALUATION' || e.code === 'ARTIFACT_REVOKED',
   );
 
   // and the delegation chain cannot be satisfied by naming somebody else
@@ -503,11 +505,11 @@ test('A23: revocation is terminal through mutate and rollback too', async () => 
   // mutate used to rewrite REVOKED to SUPERSEDED, and rollback then resurrected it.
   await assert.rejects(
     () => world.cp.mutateArtifact({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, patch: { version: '2.0.0' } }),
-    (e) => e.code === 'MUTATION_OF_REVOKED_ARTIFACT',
+    (e) => e.code === 'ARTIFACT_REVOKED' || e.code === 'MUTATION_OF_REVOKED_ARTIFACT',
   );
   assert.throws(
     () => world.cp.registry.rollback({ artifactId, toVersion: '1.0.0', by: 'agent-coord' }),
-    (e) => e.code === 'ROLLBACK_TO_REVOKED',
+    (e) => e.code === 'ARTIFACT_REVOKED' || e.code === 'ROLLBACK_TO_REVOKED',
   );
   assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
   assert.equal(world.cp.artifact(artifactId).version, world.artifacts.impl.version);
@@ -529,6 +531,47 @@ test('A24: a runner cannot open a session for another agent', async () => {
   assert.equal(client.openSession, undefined);
   assert.equal(client.registry, undefined);
   assert.equal(client.ledger, undefined);
+});
+
+test('A25: a runner cannot redeem a grant issued to another session', async () => {
+  const world = await makeWorld();
+  const work = await openWork(world);
+  const pending = await world.cp.submit(request(work.sImpl, 'write', { target: 'file:src/a.mjs', tool: 'edit' }));
+  assert.equal(pending.granted, true);
+
+  const other = await world.cp.openSession({ agentId: 'agent-impl', own: false });
+  const client = world.cp.clientFor(other.sessionId);
+  await assert.rejects(() => client.execute(pending.grantId, { args: {} }), (e) => e.code === 'GRANT_WRONG_SESSION');
+  assert.equal(world.calls.length, 0, 'possession of a grant id is not authorisation');
+
+  // and the read-only ledger view no longer publishes redeemable ids at all
+  const runner = world.cp.runnerSurface();
+  assert.equal(runner.ledger, undefined);
+});
+
+test('A26: revocation survives mutate and rollback (the third door)', async () => {
+  const world = await makeWorld();
+  const artifactId = world.artifacts.impl.artifactId;
+  const coord = await world.cp.openSession({ agentId: 'agent-coord', own: false });
+  const bump = await world.cp.openSession({ agentId: 'agent-impl', own: false });
+  // A superseded version with a passed evaluation: exactly what rollback used to restore.
+  await world.cp.mutateArtifact({ sessionId: bump.sessionId, agentId: 'agent-impl', artifactId, patch: { version: '2.0.0', instructions: 'v2' } });
+  await world.cp.revokeTrust({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, reason: 'incident response' });
+
+  await assert.rejects(
+    () => world.cp.rollbackArtifact({ sessionId: coord.sessionId, agentId: 'agent-coord', artifactId, toVersion: '1.0.0' }),
+    (e) => e.code === 'ARTIFACT_REVOKED' || e.code === 'ROLLBACK_TO_REVOKED',
+  );
+  // A second mutation is refused, and it does not matter whether the refusal arrives as a gate
+  // receipt (the session's own artifact is revoked) or as a registry exception.
+  const again = await world.cp.mutateArtifact({ sessionId: bump.sessionId, agentId: 'agent-impl', artifactId, patch: { version: '3.0.0' } }).catch((e) => ({ receipt: { effect: 'DENY', code: e.code }, executed: false }));
+  assert.notEqual(again.receipt.effect, 'ALLOW');
+  assert.equal(again.executed, false);
+  // and the registry refuses on its own, version-independently
+  assert.throws(() => world.cp.registry.mutate({ artifactId, patch: { version: '4.0.0' }, by: 'agent-impl' }), (e) => e.code === 'ARTIFACT_REVOKED');
+  // Revocation is a property of the ARTIFACT, so no version of it can come back.
+  assert.equal(world.cp.registry.isRevoked(artifactId), true);
+  assert.equal(world.cp.artifact(artifactId).trust, 'REVOKED');
 });
 
 test('A15b: the audit detects a runtime that diverged from governance', async () => {

@@ -139,7 +139,23 @@ export class ArtifactRegistry {
   constructor() {
     this.versions = new Map();   // definitionHash -> version record
     this.artifacts = new Map();  // artifactId -> { artifactId, current: definitionHash, history: [] }
+    // Revocation is scoped to the ARTIFACT, not to whichever version happened to be current when
+    // it was issued. Marking only the current version let a coordinator mutate, revoke, and then
+    // roll back to the superseded version to reinstate trust - the third door on I17.
+    this.revoked = new Map();    // artifactId -> reason
     this.events = [];
+  }
+
+  /** True when the ARTIFACT (any version of it) has been revoked. */
+  isRevoked(artifactId) {
+    return this.revoked.has(artifactId);
+  }
+
+  assertNotRevoked(artifactId) {
+    if (this.revoked.has(artifactId)) {
+      throw new Refusal('ARTIFACT_REVOKED',
+        'artifact ' + artifactId + ' trust was revoked (' + this.revoked.get(artifactId) + '); no version of it may run again');
+    }
   }
 
   #log(type, detail) {
@@ -254,21 +270,12 @@ export class ArtifactRegistry {
    * recorded rather than erased.
    */
   evaluate(input) {
+    this.assertNotRevoked(input.artifactId);
     const record = this.current(input.artifactId);
     const checks = Array.isArray(input.checks) ? input.checks : [];
-    // REVOCATION IS TERMINAL. Without this, `evaluate` silently rewrote trust back to VALIDATED,
-    // so an agent holding the evaluate role could un-revoke a definition an operator had
-    // deliberately killed, resume work under it, and re-promote it. Reproduced end to end
-    // (A1-A6) by a security scan; it defeated invariant I17 outright.
-    if (record.trust === 'REVOKED') {
-      throw new Refusal('EVALUATION_OF_REVOKED_ARTIFACT',
-        'artifact ' + input.artifactId + ' trust was revoked (' + String(record.revokedReason) +
-        '); an evaluation cannot reinstate it');
-    }
-    if (record.trust === 'SUPERSEDED') {
-      throw new Refusal('EVALUATION_OF_SUPERSEDED_ARTIFACT',
-        'artifact ' + input.artifactId + ' was superseded by ' + String(record.supersededBy));
-    }
+    // Revocation is refused by assertNotRevoked at the top of this method, for the ARTIFACT and
+    // therefore for every version. A per-version REVOKED test here was dead code once that landed:
+    // the gate proved the mutation could not be caught by any test.
     if (!input.by) throw new Refusal('EVALUATION_NEEDS_EVALUATOR', 'an evaluation must name its evaluator');
     if (input.by === record.createdBy) {
       throw new Refusal('SELF_EVALUATION', 'the author of an artifact may not evaluate it: ' + input.by);
@@ -298,6 +305,7 @@ export class ArtifactRegistry {
   }
 
   release(input) {
+    this.assertNotRevoked(input.artifactId);
     const record = this.current(input.artifactId);
     if (!input.by) throw new Refusal('RELEASE_NEEDS_ACTOR', 'a release must name who released it');
     if (!trustPermitsExecution(record.trust)) {
@@ -361,6 +369,7 @@ export class ArtifactRegistry {
   revoke(input) {
     const record = this.current(input.artifactId);
     if (!input.reason) throw new Refusal('REVOCATION_NEEDS_REASON', 'a revocation must state a reason');
+    this.revoked.set(input.artifactId, String(input.reason));
     record.trust = 'REVOKED';
     record.lifecycle = 'REVOKED';
     record.revokedAt = input.at || null;
@@ -375,15 +384,10 @@ export class ArtifactRegistry {
    * unused grant that referenced it is dead on arrival (I14).
    */
   mutate(input) {
+    this.assertNotRevoked(input.artifactId);
     const previous = this.current(input.artifactId);
-    // Revocation is terminal on every path, not just the evaluate one. `mutate` used to rewrite a
-    // REVOKED version to SUPERSEDED, and `rollback` then resurrected it - a second door onto the
-    // same invariant (security scan, high).
-    if (previous.trust === 'REVOKED') {
-      throw new Refusal('MUTATION_OF_REVOKED_ARTIFACT',
-        'artifact ' + input.artifactId + ' trust was revoked (' + String(previous.revokedReason) +
-        '); a new version cannot be derived from it');
-    }
+    // Refused by assertNotRevoked above, for every version. The per-version check that used to sit
+    // here was dead code once revocation became artifact-scoped (the gate could not catch it).
     previous.supersededBy = null; // filled below
     const next = this.register({
       artifactId: input.artifactId,
@@ -408,6 +412,7 @@ export class ArtifactRegistry {
    * never reached VALIDATED is refused, so rollback can never be a way to ship something untested.
    */
   rollback(input) {
+    this.assertNotRevoked(input.artifactId);
     const target = this.versionOf(input.artifactId, input.toVersion);
     if (target.trust === 'REVOKED') {
       throw new Refusal('ROLLBACK_TO_REVOKED',

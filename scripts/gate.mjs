@@ -45,18 +45,32 @@ const MUTATIONS = [
     caughtBy: 'an expired approval still authorises an external action',
   },
   {
+    id: 'grant-redeemable-by-anyone',
+    file: 'src/control-plane.mjs',
+    find: '        if (grant.sessionId !== sessionId) {',
+    replace: '        if (false) {',
+    caughtBy: 'any holder of a grant id can redeem it',
+  },
+  {
+    id: 'revocation-scoped-to-version',
+    file: 'src/identity.mjs',
+    find: '    this.assertNotRevoked(input.artifactId);\n    const target = this.versionOf(input.artifactId, input.toVersion);',
+    replace: '    const target = this.versionOf(input.artifactId, input.toVersion);',
+    caughtBy: 'a superseded version can be rolled back into service after revocation',
+  },
+  {
+    id: 'runner-handoff-open',
+    file: 'src/control-plane.mjs',
+    find: "    view.handoff = operatorOnly('handoff');",
+    replace: '    view.handoff = handoff;',
+    caughtBy: 'a runner can hand off to an agent of its choosing',
+  },
+  {
     id: 'approval-check-in-wrapper-only',
     file: 'src/policy.mjs',
     find: '      if (target.agentId !== ctx.request.agentId) return null;',
     replace: '      if (true) return null;',
     caughtBy: 'an agent can approve its own external action through the gated action',
-  },
-  {
-    id: 'revocation-door-via-mutate',
-    file: 'src/identity.mjs',
-    find: "    if (previous.trust === 'REVOKED') {",
-    replace: '    if (false) {',
-    caughtBy: 'revocation is terminal only on the evaluate path',
   },
   {
     id: 'runner-can-open-sessions',
@@ -66,11 +80,11 @@ const MUTATIONS = [
     caughtBy: 'a runner can open a session for any minted agent',
   },
   {
-    id: 'runner-surface-inherits-raw',
+    id: 'operator-surface-not-separated',
     file: 'src/control-plane.mjs',
-    find: '    view.ledger = readOnlyLedger(ledger);',
-    replace: '    view.ledger = ledger;',
-    caughtBy: 'the runner-facing view hands back the minting ledger',
+    find: "    registerArtifact: exposeInternals ? registerArtifact : operatorOnly('registerArtifact'),",
+    replace: '    registerArtifact,',
+    caughtBy: 'a control plane without the opt-in can still register artifacts',
   },
   {
     id: 'verification-of-foreign-work',
@@ -79,13 +93,7 @@ const MUTATIONS = [
     replace: '        if (false) {',
     caughtBy: 'a verifier can bind unrelated work to its task',
   },
-  {
-    id: 'revocation-is-terminal',
-    file: 'src/identity.mjs',
-    find: "    if (record.trust === 'REVOKED') {",
-    replace: '    if (false) {',
-    caughtBy: 'a revoked artifact can be revived by evaluating it',
-  },
+
   {
     id: 'forged-execution',
     file: 'src/ledger.mjs',
