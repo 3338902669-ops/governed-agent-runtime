@@ -11,7 +11,7 @@ verifier; the verifier (天枢 / tianshu, headless `rivet` worker) does not writ
 
 ## What the verifier's findings were worth
 
-None of these were found by the 49-test suite, the benchmark, or the gate - all of which were green.
+None of these were found by the 59-test suite, the benchmark, or the gate - all of which were green.
 They were found by reading the code for the *reachable* surface rather than the *intended* one.
 
 ### F1 - a prevention count with no positive control  → FIXED
@@ -136,7 +136,7 @@ Recording that gap is the point: "fixed" and "independently confirmed fixed" are
 
 **A test suite tests the API you intended; an adversary tests the API you shipped.**
 
-The 49 tests passed, the benchmark reported 12/12 prevented and the gate caught 16 injected faults -
+The 59 tests passed, the benchmark reported 12/12 prevented and the gate caught 18 injected faults -
 none of which touched the two-line path from `cp.ledger.issueGrant` to `cp.runtime.execute`. Two
 rounds of an independent reader who was told "do not trust the implementer's numbers" found it in
 minutes of reading. That is the whole argument for separating execution rights from completion

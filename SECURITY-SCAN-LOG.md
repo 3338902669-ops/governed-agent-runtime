@@ -18,8 +18,8 @@ it measured a moving tree.
 | 5 | `66374a8` | - | - | **cancelled** — the tree was edited while it ran |
 | 6 | `9b98073` | complete | **1 high**, 5 medium, 3 low | not passed |
 
-Six rounds. Zero passes. Meanwhile the project's own suite was green every time (49 tests) and the
-mutation gate caught all 16 injected faults. **A test suite tests the API you intended; an adversary
+Six rounds. Zero passes. Meanwhile the project's own suite was green every time (59 tests) and the
+mutation gate caught all 18 injected faults. **A test suite tests the API you intended; an adversary
 tests the API you shipped.**
 
 ## The shape of the failure

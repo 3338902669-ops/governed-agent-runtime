@@ -52,7 +52,7 @@ finding F1). It is the difference between a number and a measurement.
   by construction. The reason to print them is that "we have rules for that" and "the rules have
   teeth" produce identical documents and different numbers.
 - **The gate enforces the result.** `scripts/gate.mjs` fails if the third column is not zero, and
-  fails if the positive control did not pass. Sixteen injected faults must all be caught, including two
+  fails if the positive control did not pass. Eighteen injected faults must all be caught, including two
   that pin the defects an independent verification round found (C1: the default surface must not mint
   grants; C2: an execution must consume a grant the gate issued).
 - **The benchmark writes outside the repository on request.** Set `GAR_OUT_DIR` to keep

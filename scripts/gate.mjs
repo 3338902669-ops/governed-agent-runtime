@@ -17,7 +17,7 @@ const REPO = join(HERE, '..');
 // to hardcode the author's directory name and then OVERRIDE the environment variable for every
 // child process, so relocating the governance engine was impossible.
 const GOVERNANCE_LIB = resolveGovernanceLib();
-const TEST_FILES = ['test/invariants.test.mjs', 'test/adversarial.test.mjs'];
+const TEST_FILES = ['test/invariants.test.mjs', 'test/adversarial.test.mjs', 'test/auditor.test.mjs'];
 
 const MUTATIONS = [
   {
@@ -47,6 +47,20 @@ const MUTATIONS = [
     find: '      if (approval.expiresAt && new Date(ctx.now).getTime() > new Date(approval.expiresAt).getTime()) {',
     replace: '      if (false) {',
     caughtBy: 'an expired approval still authorises an external action',
+  },
+  {
+    id: 'auditor-chain-check-skipped',
+    file: 'src/auditor.mjs',
+    find: '    if (row.prev !== previous || row.hash !== expected) {',
+    replace: '    if (false) {',
+    caughtBy: 'the auditor accepts an edited ledger',
+  },
+  {
+    id: 'auditor-actor-check-skipped',
+    file: 'src/auditor.mjs',
+    find: '    if (verification.verifierActorId === execution.actorId) {',
+    replace: '    if (false) {',
+    caughtBy: 'the auditor accepts an actor verifying its own work',
   },
   {
     id: 'actor-independence-skipped',

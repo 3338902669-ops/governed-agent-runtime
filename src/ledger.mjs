@@ -162,6 +162,9 @@ export class Ledger {
       // Which task this execution belongs to. A verification may only be about work from its own
       // task; without this, a verifier could nominate unrelated work as a task's implementation.
       taskId: input.taskId === undefined ? null : input.taskId,
+      // Which external action this was, if any. The grant carried it; the record must too, or an
+      // auditor cannot tell an approved deploy from an unapproved one.
+      external: input.external === undefined ? null : input.external,
       startedAt: input.startedAt || this.#at(),
       finishedAt: this.#at(),
       outcome: input.outcome,
@@ -271,6 +274,9 @@ export class Ledger {
     const record = {
       verificationId: newId('ver'),
       verifierAgentId: input.verifierAgentId,
+      // Without the verifier's ACTOR the independence claim cannot be re-checked after the fact:
+      // the rule is enforced live, but a record that cannot be audited is a record you must trust.
+      verifierActorId: input.verifierActorId === undefined ? null : input.verifierActorId,
       subjectExecutionId: subject.executionId,
       subjectAgentId: subject.agentId,
       verdict,

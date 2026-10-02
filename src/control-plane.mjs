@@ -267,8 +267,13 @@ export async function createControlPlane(options) {
         return registry.promote({ artifactId: target, by: agentId, approval: args.approval, at: clock() });
       case 'rollback':
         return registry.rollback({ artifactId: target, toVersion: args.toVersion, by: agentId, at: clock() });
-      case 'revoke':
-        return registry.revoke({ artifactId: target, reason: args.reason, by: agentId, at: clock() });
+      case 'revoke': {
+        const revoked = registry.revoke({ artifactId: target, reason: args.reason, by: agentId, at: clock() });
+        // Recorded, because revocation with no ledger row is unauditable: an auditor has no way to
+        // ask "was anything executed under this artifact afterwards?".
+        ledger.append('trust.revoked', { artifactId: target, reason: args.reason, by: agentId, at: clock() });
+        return revoked;
+      }
       case 'approve': {
         const session = requireSession(args.sessionId);
         // Defence in depth behind the grant: the gate rule P18d refuses this before a grant is even
@@ -542,7 +547,7 @@ export async function createControlPlane(options) {
     };
     sessions.set(sessionId, session);
     ledger.append('session.opened', {
-      sessionId, agentId: session.agentId, actorId: session.actorId, taskId: session.taskId,
+      sessionId, agentId: session.agentId, actorId: session.actorId, artifactId, taskId: session.taskId,
       ownsTask: session.ownsTask, definitionHash: session.definitionHash,
       identityHash: session.identityHash, reason: session.reason,
     });
