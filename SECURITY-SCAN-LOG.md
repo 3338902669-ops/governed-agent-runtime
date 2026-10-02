@@ -16,7 +16,7 @@ it measured a moving tree.
 | 3 | `193a65d` | complete | **3 high**, 2 medium, 1 low | not passed |
 | 4 | `6bf9461` | complete | **1 high**, 2 medium, 1 low | not passed |
 | 5 | `66374a8` | - | - | **cancelled** — the tree was edited while it ran |
-| 6 | `9b98073` | complete | **1 high**, 3 medium, 1 low | not passed |
+| 6 | `9b98073` | complete | **1 high**, 5 medium, 3 low | not passed |
 
 Six rounds. Zero passes. Meanwhile the project's own suite was green every time (49 tests) and the
 mutation gate caught all 16 injected faults. **A test suite tests the API you intended; an adversary
@@ -73,15 +73,32 @@ caller parameters.
 - Medium: revocation had a third door via a superseded version; the read-only ledger published
   redeemable grant ids and `execute` authorised by possession alone.
 
-## Round 6 — `9b98073` (1 high)
+## Round 6 — `9b98073` (1 high, 5 medium, 3 low)
 
-- **Approval independence is decided between agent ids, not actors.** One actor holding both the
-  requesting session and any coordinator session approves its own deploy.
-- Medium: `revokeActor` leaves live sessions and unspent grants usable; any agent with
-  `mutate_artifact` can replace another agent's artifact definition; a task-bound session can write a
-  resource another live task holds.
-- Low: the runner client's `close` and `execute` bypass the session token — it is enforced only
-  inside the policy gate.
+> **Read this number carefully.** Round 6 was first read while the scan was still writing, which
+> showed 5 findings. The sealed result holds **9**. The figures below are the sealed ones. The scan
+> also picked up documentation added during its run (24/24 files); the code it judged was frozen at
+> `9b98073`, and every finding below is in `src/`, which did not change.
+
+- **HIGH — approval independence is compared between agent ids, not actors.** One actor holding both
+  the requesting session and any coordinator session approves its own deploy. The previous round
+  moved *verification* independence to the actor level and left *approval* where it was.
+- Medium — the `handoff` executor resolves the predecessor session from caller-supplied
+  `params.sessionId` instead of the authenticated session.
+- Medium — the `mark_done` gate validates `request.taskId` while the executor closes over
+  `params.taskId`, so a stale PASS can assert a `done` fact for work whose latest verification failed.
+- Medium — artifact mutation is not ownership-scoped: the session artifact-integrity rules key on the
+  session's artifact rather than on the mutation target, so any holder of `mutate_artifact` can
+  replace another agent's definition.
+- Medium — resource exclusion is keyed only to the requesting session's own task, so a task-bound
+  session can write a resource another live task holds.
+- Medium — actor revocation does not terminate live sessions, which keep minting grants and
+  producing facts.
+- Low — grant redemption does not re-authenticate the session, so a session id plus a pending grant
+  id is a bearer capability.
+- Low — `audit()` discloses live session ids to any caller of the read-only or runner surface.
+- Low — `closeSession` performs no authority check and is exposed on the default control-plane
+  surface.
 
 ## Why this is published rather than fixed
 
