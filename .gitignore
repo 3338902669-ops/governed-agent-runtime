@@ -1,0 +1,3 @@
+﻿bench/evidence/
+*.log
+node_modules/
